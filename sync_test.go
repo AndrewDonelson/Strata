@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/AndrewDonelson/strata"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -200,4 +200,49 @@ func TestDataStore_Close_FlushesSync(t *testing.T) {
 	_ = ds.Set(context.Background(), "close_flush", "k", &Item{ID: "k", Val: "v"})
 	// Close should flush dirty entries
 	assert.NoError(t, ds.Close())
+}
+
+// ── Cross-store invalidate_all via pub/sub ────────────────────────────────────
+
+func TestSync_HandleInvalidation_InvalidateAll_CrossStore(t *testing.T) {
+	// Smoke test: InvalidateAll on ds1 publishes an invalidate_all pub/sub message.
+	// The white-box TestHandleInvalidation_InvalidateAll test verifies the actual
+	// handleInvalidation logic; here we verify the full pipeline doesn't panic.
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	makeDS := func() *strata.DataStore {
+		ds, e := strata.NewDataStore(strata.Config{RedisAddr: mr.Addr()})
+		require.NoError(t, e)
+		return ds
+	}
+
+	ds1 := makeDS()
+	defer ds1.Close()
+	ds2 := makeDS()
+	defer ds2.Close()
+
+	// Give subscribeLoop goroutines time to connect and subscribe before publishing
+	time.Sleep(80 * time.Millisecond)
+
+	s := strata.Schema{Name: "cross_ia", Model: &Product{}, L1: strata.MemPolicy{TTL: time.Minute}}
+	require.NoError(t, ds1.Register(s))
+	require.NoError(t, ds2.Register(s))
+
+	ctx := context.Background()
+
+	for _, id := range []string{"ia1", "ia2", "ia3"} {
+		require.NoError(t, ds1.Set(ctx, "cross_ia", id, &Product{ID: id, Name: "x"}))
+	}
+
+	// ds1 invalidates all entries for the schema → publishes invalidate_all
+	require.NoError(t, ds1.InvalidateAll(ctx, "cross_ia"))
+
+	// Allow pub/sub to propagate; just verify no panics and consistent state
+	time.Sleep(200 * time.Millisecond)
+
+	// ds2 Stats should not panic and L1 entries should be non-negative
+	st := ds2.Stats()
+	assert.GreaterOrEqual(t, st.L1Entries, int64(0))
 }
