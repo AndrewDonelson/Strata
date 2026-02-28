@@ -85,6 +85,7 @@ type compiledSchema struct {
 	pkIndex   int
 	tableName string
 	modelType reflect.Type
+	l1Prefix  string // pre-computed cs.Name+":", avoids fmt.Sprintf on every Get
 }
 
 // schemaRegistry holds all registered schemas.
@@ -146,6 +147,7 @@ func (r *schemaRegistry) register(s Schema) (*compiledSchema, error) {
 		pkIndex:   pkIdx,
 		tableName: tableName,
 		modelType: structType,
+		l1Prefix:  s.Name + ":",
 	}
 	r.schemas[s.Name] = cs
 	return cs, nil

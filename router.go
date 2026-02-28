@@ -29,7 +29,7 @@ func colNames(cs *compiledSchema) []string {
 
 // routerGet attempts L1 → L2 → L3 and back-fills upper tiers on a miss.
 func (ds *DataStore) routerGet(ctx context.Context, cs *compiledSchema, id string, dest any) error {
-	l1Key := fmt.Sprintf("%s:%s", cs.Name, id)
+	l1Key := cs.l1Prefix + id
 
 	// L1 hit
 	if ds.l1 != nil {
@@ -101,7 +101,7 @@ func (ds *DataStore) routerSetWriteThrough(ctx context.Context, cs *compiledSche
 	}
 	// L1
 	if ds.l1 != nil {
-		ds.setL1(cs, fmt.Sprintf("%s:%s", cs.Name, id), value)
+		ds.setL1(cs, cs.l1Prefix+id, value)
 	}
 	// Invalidate other nodes
 	if ds.sync != nil {
@@ -113,7 +113,7 @@ func (ds *DataStore) routerSetWriteThrough(ctx context.Context, cs *compiledSche
 func (ds *DataStore) routerSetWriteBehind(ctx context.Context, cs *compiledSchema, id string, value any) error {
 	// L1 immediately
 	if ds.l1 != nil {
-		ds.setL1(cs, fmt.Sprintf("%s:%s", cs.Name, id), value)
+		ds.setL1(cs, cs.l1Prefix+id, value)
 	}
 	// L2 immediately
 	if ds.l2 != nil {
@@ -138,7 +138,7 @@ func (ds *DataStore) routerSetL1Async(ctx context.Context, cs *compiledSchema, i
 	}
 	// L1 asynchronously
 	if ds.l1 != nil {
-		key := fmt.Sprintf("%s:%s", cs.Name, id)
+		key := cs.l1Prefix + id
 		go ds.setL1(cs, key, value)
 	}
 	if ds.sync != nil {
@@ -152,7 +152,7 @@ func (ds *DataStore) routerSetL1Async(ctx context.Context, cs *compiledSchema, i
 // ────────────────────────────────────────────────────────────────────────────
 
 func (ds *DataStore) routerDelete(ctx context.Context, cs *compiledSchema, id string) error {
-	l1Key := fmt.Sprintf("%s:%s", cs.Name, id)
+	l1Key := cs.l1Prefix + id
 	if ds.l1 != nil {
 		ds.l1.Delete(l1Key)
 	}

@@ -85,7 +85,7 @@ type Config struct {
 
 func (c *Config) defaults() {
 	if c.Codec == nil {
-		c.Codec = codec.JSON{}
+		c.Codec = codec.MsgPack{}
 	}
 	if c.Clock == nil {
 		c.Clock = clock.Real{}
@@ -415,7 +415,7 @@ func (ds *DataStore) Exists(ctx context.Context, schemaName, id string) (bool, e
 	if err != nil {
 		return false, err
 	}
-	l1Key := fmt.Sprintf("%s:%s", schemaName, id)
+	l1Key := cs.l1Prefix + id
 	if ds.l1 != nil {
 		if _, ok := ds.l1.Get(l1Key); ok {
 			return true, nil
@@ -463,7 +463,7 @@ func (ds *DataStore) Invalidate(ctx context.Context, schemaName, id string) erro
 	if ds.closed.Load() {
 		return ErrUnavailable
 	}
-	l1Key := fmt.Sprintf("%s:%s", schemaName, id)
+	l1Key := schemaName + ":" + id
 	if ds.l1 != nil {
 		ds.l1.Delete(l1Key)
 	}
@@ -615,7 +615,7 @@ func (ds *DataStore) WarmCache(ctx context.Context, schemaName string, limit int
 		}
 		id := fmt.Sprintf("%v", elem.Field(cs.pkIndex).Interface())
 		v := elem.Addr().Interface()
-		l1Key := fmt.Sprintf("%s:%s", cs.Name, id)
+		l1Key := cs.l1Prefix + id
 		if ds.l1 != nil {
 			ds.setL1(cs, l1Key, v)
 		}

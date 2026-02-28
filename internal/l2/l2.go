@@ -11,8 +11,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const keyFmt = "%s:%s:%v"
-
 // Store is the L2 Redis cache adapter.
 type Store struct {
 	client    redis.UniversalClient
@@ -32,25 +30,27 @@ type Options struct {
 // New creates a new L2 Store.
 func New(opts Options) *Store {
 	if opts.Codec == nil {
-		opts.Codec = codec.JSON{}
+		opts.Codec = codec.MsgPack{}
 	}
 	return &Store{client: opts.Client, codec: opts.Codec, keyPrefix: opts.KeyPrefix}
 }
 
 // key returns the Redis key for the given schema and id.
-func (s *Store) key(schema, keyPrefix string, id any) string {
+// Uses string concatenation instead of fmt.Sprintf to eliminate intermediate
+// allocations on the hot path.
+func (s *Store) key(schema, keyPrefix, id string) string {
 	prefix := schema
 	if keyPrefix != "" {
 		prefix = keyPrefix
 	}
 	if s.keyPrefix != "" {
-		return fmt.Sprintf(keyFmt, s.keyPrefix+":"+prefix, schema, id)
+		return s.keyPrefix + ":" + prefix + ":" + schema + ":" + id
 	}
-	return fmt.Sprintf(keyFmt, prefix, schema, id)
+	return prefix + ":" + schema + ":" + id
 }
 
 // Set stores a value in Redis with the given TTL.
-func (s *Store) Set(ctx context.Context, schema, keyPrefix string, id any, value any, ttl time.Duration) error {
+func (s *Store) Set(ctx context.Context, schema, keyPrefix, id string, value any, ttl time.Duration) error {
 	b, err := s.codec.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("l2 marshal: %w", err)
@@ -64,7 +64,7 @@ func (s *Store) Set(ctx context.Context, schema, keyPrefix string, id any, value
 
 // Get retrieves and deserializes a value from Redis into dest.
 // Returns (without error) when key is missing; caller detects miss by checking dest.
-func (s *Store) Get(ctx context.Context, schema, keyPrefix string, id, dest any) error {
+func (s *Store) Get(ctx context.Context, schema, keyPrefix, id string, dest any) error {
 	k := s.key(schema, keyPrefix, id)
 	b, err := s.client.Get(ctx, k).Bytes()
 	if err != nil {
@@ -82,7 +82,7 @@ func (s *Store) Get(ctx context.Context, schema, keyPrefix string, id, dest any)
 }
 
 // Exists checks whether a key exists in Redis.
-func (s *Store) Exists(ctx context.Context, schema, keyPrefix string, id any) (bool, error) {
+func (s *Store) Exists(ctx context.Context, schema, keyPrefix, id string) (bool, error) {
 	k := s.key(schema, keyPrefix, id)
 	n, err := s.client.Exists(ctx, k).Result()
 	if err != nil {
@@ -92,7 +92,7 @@ func (s *Store) Exists(ctx context.Context, schema, keyPrefix string, id any) (b
 }
 
 // Delete removes a key from Redis.
-func (s *Store) Delete(ctx context.Context, schema, keyPrefix string, id any) error {
+func (s *Store) Delete(ctx context.Context, schema, keyPrefix, id string) error {
 	k := s.key(schema, keyPrefix, id)
 	if err := s.client.Del(ctx, k).Err(); err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("l2 delete %s: %w", k, err)
@@ -102,7 +102,7 @@ func (s *Store) Delete(ctx context.Context, schema, keyPrefix string, id any) er
 
 // KV is a key-value pair for batch operations.
 type KV struct {
-	ID    any
+	ID    string
 	Value any
 }
 
@@ -112,7 +112,7 @@ func (s *Store) SetMany(ctx context.Context, schema, keyPrefix string, kvs []KV,
 	for _, kv := range kvs {
 		b, err := s.codec.Marshal(kv.Value)
 		if err != nil {
-			return fmt.Errorf("l2 marshal id=%v: %w", kv.ID, err)
+			return fmt.Errorf("l2 marshal id=%s: %w", kv.ID, err)
 		}
 		pipe.Set(ctx, s.key(schema, keyPrefix, kv.ID), b, ttl)
 	}
@@ -121,8 +121,8 @@ func (s *Store) SetMany(ctx context.Context, schema, keyPrefix string, kvs []KV,
 }
 
 // GetMany retrieves multiple values using a Redis pipeline.
-// Returns a map of id (formatted) -> raw bytes; missing keys are absent.
-func (s *Store) GetMany(ctx context.Context, schema, keyPrefix string, ids []any) (map[string][]byte, error) {
+// Returns a map of id -> raw bytes; missing keys are absent.
+func (s *Store) GetMany(ctx context.Context, schema, keyPrefix string, ids []string) (map[string][]byte, error) {
 	pipe := s.client.Pipeline()
 	cmds := make([]*redis.StringCmd, len(ids))
 	for i, id := range ids {
@@ -136,9 +136,9 @@ func (s *Store) GetMany(ctx context.Context, schema, keyPrefix string, ids []any
 			if errors.Is(err, redis.Nil) {
 				continue
 			}
-			return nil, fmt.Errorf("l2 get-many id=%v: %w", ids[i], err)
+			return nil, fmt.Errorf("l2 get-many id=%s: %w", ids[i], err)
 		}
-		result[fmt.Sprintf("%v", ids[i])] = b
+		result[ids[i]] = b
 	}
 	return result, nil
 }
@@ -218,6 +218,6 @@ func (s *Store) DelRaw(ctx context.Context, key string) error {
 }
 
 // FormatKey returns the formatted cache key for external use.
-func (s *Store) FormatKey(schema, keyPrefix string, id any) string {
+func (s *Store) FormatKey(schema, keyPrefix, id string) string {
 	return s.key(schema, keyPrefix, id)
 }

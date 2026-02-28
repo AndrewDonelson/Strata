@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/AndrewDonelson/strata/internal/codec"
 	"github.com/AndrewDonelson/strata/internal/l2"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,7 +114,7 @@ func TestL2_SetMany_GetMany(t *testing.T) {
 	}
 	require.NoError(t, s.SetMany(ctx, "schema", "", kvs, time.Minute))
 
-	result, err := s.GetMany(ctx, "schema", "", []any{"10", "20", "30", "missing"})
+	result, err := s.GetMany(ctx, "schema", "", []string{"10", "20", "30", "missing"})
 	require.NoError(t, err)
 	assert.Len(t, result, 3)
 	assert.Contains(t, result, "10")
