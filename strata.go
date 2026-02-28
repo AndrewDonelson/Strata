@@ -367,6 +367,10 @@ func (ds *DataStore) SearchCached(ctx context.Context, schemaName string, q *Que
 	if err != nil {
 		return err
 	}
+	if q == nil {
+		empty := Q().Build()
+		q = &empty
+	}
 	cols := colNames(cs)
 	sql, args := q.ToSQL(cs.tableName, cols, 100)
 	cacheKey := fmt.Sprintf("search:%s:%08x", schemaName, hashString(sql+fmt.Sprint(args)))
@@ -375,7 +379,7 @@ func (ds *DataStore) SearchCached(ctx context.Context, schemaName string, q *Que
 		ttl = ds.cfg.DefaultL2TTL
 	}
 
-	if raw, err2 := ds.l2.GetRaw(ctx, cacheKey); err2 == nil {
+	if raw, err2 := ds.l2.GetRaw(ctx, cacheKey); err2 == nil && raw != nil {
 		return ds.cfg.Codec.Unmarshal(raw, destSlice)
 	}
 

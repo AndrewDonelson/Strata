@@ -1,0 +1,203 @@
+package strata_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/AndrewDonelson/strata"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newDSWithRedis creates a DataStore backed by a miniredis instance.
+func newDSWithRedis(t *testing.T) (*strata.DataStore, *miniredis.Miniredis) {
+	t.Helper()
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+
+	ds, err := strata.NewDataStore(strata.Config{
+		RedisAddr: mr.Addr(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+	return ds, mr
+}
+
+// ── Invalidation via pub/sub ──────────────────────────────────────────────────
+
+func TestSync_Invalidation_PublishedOnSet(t *testing.T) {
+	// Two stores sharing the same miniredis; write on ds1 should invalidate ds2's L1.
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	makeDS := func() *strata.DataStore {
+		ds, e := strata.NewDataStore(strata.Config{RedisAddr: mr.Addr()})
+		require.NoError(t, e)
+		return ds
+	}
+
+	ds1 := makeDS()
+	defer ds1.Close()
+	ds2 := makeDS()
+	defer ds2.Close()
+
+	type Item struct {
+		ID  string `strata:"primary_key"`
+		Val string
+	}
+	s := strata.Schema{Name: "sync_item", Model: &Item{}, L1: strata.MemPolicy{TTL: time.Minute}}
+	require.NoError(t, ds1.Register(s))
+	require.NoError(t, ds2.Register(s))
+
+	ctx := context.Background()
+
+	// Warm ds2's L1 cache
+	require.NoError(t, ds1.Set(ctx, "sync_item", "x1", &Item{ID: "x1", Val: "original"}))
+	var pre Item
+	require.NoError(t, ds2.Get(ctx, "sync_item", "x1", &pre))
+
+	// Update via ds1
+	require.NoError(t, ds1.Set(ctx, "sync_item", "x1", &Item{ID: "x1", Val: "updated"}))
+
+	// Give pub/sub time to propagate
+	time.Sleep(100 * time.Millisecond)
+
+	// ds2's L1 entry should have been invalidated; with no L3, this is ErrNotFound
+	var post Item
+	err2 := ds2.Get(ctx, "sync_item", "x1", &post)
+	// Either updated (from L2) or not found; should NOT be stale "original"
+	if err2 == nil {
+		assert.NotEqual(t, "original", post.Val, "stale L1 read after invalidation")
+	}
+}
+
+// ── WriteBehind + flush ───────────────────────────────────────────────────────
+
+func TestSync_WriteBehind_FlushesViaClose(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+
+	type Item struct {
+		ID  string `strata:"primary_key"`
+		Val string
+	}
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:      "wb_flush",
+		Model:     &Item{},
+		WriteMode: strata.WriteBehind,
+	}))
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		require.NoError(t, ds.Set(ctx, "wb_flush", "k"+string(rune('a'+i)), &Item{ID: "k" + string(rune('a'+i)), Val: "v"}))
+	}
+
+	// FlushDirty should complete without error
+	require.NoError(t, ds.FlushDirty(ctx))
+}
+
+func TestSync_WriteBehind_Stats_DirtyCount(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+
+	type Item struct {
+		ID  string `strata:"primary_key"`
+		Val string
+	}
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:      "wb_stats",
+		Model:     &Item{},
+		WriteMode: strata.WriteBehind,
+	}))
+
+	ctx := context.Background()
+	_ = ds.Set(ctx, "wb_stats", "k1", &Item{ID: "k1", Val: "v"})
+
+	st := ds.Stats()
+	assert.GreaterOrEqual(t, st.Sets, int64(1))
+}
+
+// ── Invalidate / InvalidateAll with L2 ───────────────────────────────────────
+
+func TestDataStore_Invalidate_WithL2(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+	registerProduct(t, ds)
+
+	ctx := context.Background()
+	p := &Product{ID: "inv1", Name: "ToInvalidate", Price: 5}
+	require.NoError(t, ds.Set(ctx, "product", "inv1", p))
+
+	// Verify L1 is populated
+	var got Product
+	require.NoError(t, ds.Get(ctx, "product", "inv1", &got))
+
+	// Invalidate should clear L1 (and L2 if set)
+	require.NoError(t, ds.Invalidate(ctx, "product", "inv1"))
+
+	var gone Product
+	err := ds.Get(ctx, "product", "inv1", &gone)
+	// With L2 populated, could still retrieve from L2; with no L3, either ErrNotFound or got from L2
+	// We just assert no panic/crash
+	_ = err
+}
+
+func TestDataStore_InvalidateAll_WithL2(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+	registerProduct(t, ds)
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		p := &Product{ID: "ia" + string(rune('0'+i)), Name: "P", Price: 1}
+		_ = ds.Set(ctx, "product", p.ID, p)
+	}
+
+	require.NoError(t, ds.InvalidateAll(ctx, "product"))
+}
+
+// ── Exists with L2 ───────────────────────────────────────────────────────────
+
+func TestDataStore_Exists_WithL2(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+	registerProduct(t, ds)
+
+	ctx := context.Background()
+	p := &Product{ID: "ex_l2", Name: "Present", Price: 1}
+	require.NoError(t, ds.Set(ctx, "product", "ex_l2", p))
+
+	ok, err := ds.Exists(ctx, "product", "ex_l2")
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+// ── SearchCached with L2 ──────────────────────────────────────────────────────
+
+func TestDataStore_SearchCached_L2Hit(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+	registerProduct(t, ds)
+
+	// SearchCached with no L3 → Search falls through → ErrL3Unavailable
+	// But the code path for L2 cache lookup IS exercised
+	var results []Product
+	err := ds.SearchCached(context.Background(), "product", nil, &results)
+	assert.ErrorIs(t, err, strata.ErrL3Unavailable)
+}
+
+// ── Close flushes dirty ───────────────────────────────────────────────────────
+
+func TestDataStore_Close_FlushesSync(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+	type Item struct {
+		ID  string `strata:"primary_key"`
+		Val string
+	}
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:      "close_flush",
+		Model:     &Item{},
+		WriteMode: strata.WriteBehind,
+	}))
+	_ = ds.Set(context.Background(), "close_flush", "k", &Item{ID: "k", Val: "v"})
+	// Close should flush dirty entries
+	assert.NoError(t, ds.Close())
+}

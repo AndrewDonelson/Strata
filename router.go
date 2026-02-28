@@ -248,6 +248,9 @@ func (ds *DataStore) readFromL3(ctx context.Context, cs *compiledSchema, id stri
 }
 
 func (ds *DataStore) writeToL3(ctx context.Context, cs *compiledSchema, value any) error {
+	if ds.l3 == nil {
+		return ErrL3Unavailable
+	}
 	val := reflect.ValueOf(value)
 	if val.Kind() == reflect.Ptr {
 		val = val.Elem()

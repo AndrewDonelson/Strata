@@ -1,0 +1,30 @@
+=== RUN   TestLoad_ConcurrentSetGet
+=== PAUSE TestLoad_ConcurrentSetGet
+=== RUN   TestLoad_ConcurrentSetDelete
+=== PAUSE TestLoad_ConcurrentSetDelete
+=== RUN   TestLoad_HotKey
+=== PAUSE TestLoad_HotKey
+=== RUN   TestLoad_WriteBehind_HighVolume
+=== PAUSE TestLoad_WriteBehind_HighVolume
+=== RUN   TestLoad_Mixed_Operations
+=== PAUSE TestLoad_Mixed_Operations
+=== RUN   TestLoad_Invalidate_Concurrent
+=== PAUSE TestLoad_Invalidate_Concurrent
+=== RUN   TestLoad_SetMany_Concurrent
+=== PAUSE TestLoad_SetMany_Concurrent
+=== CONT  TestLoad_ConcurrentSetGet
+=== CONT  TestLoad_WriteBehind_HighVolume
+=== CONT  TestLoad_HotKey
+=== CONT  TestLoad_Mixed_Operations
+=== CONT  TestLoad_Invalidate_Concurrent
+=== CONT  TestLoad_SetMany_Concurrent
+=== CONT  TestLoad_ConcurrentSetDelete
+--- PASS: TestLoad_SetMany_Concurrent (0.01s)
+--- PASS: TestLoad_Invalidate_Concurrent (0.01s)
+--- PASS: TestLoad_ConcurrentSetDelete (0.01s)
+--- PASS: TestLoad_Mixed_Operations (0.02s)
+--- PASS: TestLoad_ConcurrentSetGet (0.02s)
+--- PASS: TestLoad_HotKey (0.04s)
+--- PASS: TestLoad_WriteBehind_HighVolume (0.22s)
+PASS
+ok  	github.com/AndrewDonelson/strata	1.233s
