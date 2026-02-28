@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Strata" width="320" />
+</p>
+
 # Strata
 
 **Three-tier auto-caching data library for Go — L1 (memory) → L2 (Redis) → L3 (PostgreSQL) behind a single API.**
