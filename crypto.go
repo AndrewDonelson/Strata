@@ -46,6 +46,11 @@ func (e *AES256GCM) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
+	// io.ReadFull on rand.Reader (backed by /dev/urandom on Linux) never
+	// returns an error in practice.  The branch exists for correctness on
+	// exotic platforms or future OS changes.  Covering it would require
+	// making the random reader injectable as a production-code change purely
+	// for a dead-code path — intentionally left uncovered.
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}

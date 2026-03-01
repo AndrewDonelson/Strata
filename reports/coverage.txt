@@ -1,6 +1,6 @@
 github.com/AndrewDonelson/strata/crypto.go:30:				NewAES256GCM		83.3%
 github.com/AndrewDonelson/strata/crypto.go:43:				Encrypt			71.4%
-github.com/AndrewDonelson/strata/crypto.go:56:				Decrypt			85.7%
+github.com/AndrewDonelson/strata/crypto.go:61:				Decrypt			85.7%
 github.com/AndrewDonelson/strata/internal/clock/clock.go:21:		Now			100.0%
 github.com/AndrewDonelson/strata/internal/clock/clock.go:29:		NewMock			100.0%
 github.com/AndrewDonelson/strata/internal/clock/clock.go:37:		Now			100.0%
@@ -112,12 +112,12 @@ github.com/AndrewDonelson/strata/router.go:95:				routerSet		100.0%
 github.com/AndrewDonelson/strata/router.go:106:				routerSetWriteThrough	100.0%
 github.com/AndrewDonelson/strata/router.go:128:				routerSetWriteBehind	100.0%
 github.com/AndrewDonelson/strata/router.go:144:				routerSetL1Async	100.0%
-github.com/AndrewDonelson/strata/router.go:168:				routerDelete		90.9%
-github.com/AndrewDonelson/strata/router.go:191:				routerSearch		87.5%
+github.com/AndrewDonelson/strata/router.go:168:				routerDelete		100.0%
+github.com/AndrewDonelson/strata/router.go:191:				routerSearch		95.8%
 github.com/AndrewDonelson/strata/router.go:232:				setL1			100.0%
 github.com/AndrewDonelson/strata/router.go:240:				setL2			100.0%
-github.com/AndrewDonelson/strata/router.go:248:				readFromL3		91.7%
-github.com/AndrewDonelson/strata/router.go:268:				writeToL3		87.5%
+github.com/AndrewDonelson/strata/router.go:248:				readFromL3		100.0%
+github.com/AndrewDonelson/strata/router.go:268:				writeToL3		93.8%
 github.com/AndrewDonelson/strata/router.go:327:				buildScanDest		100.0%
 github.com/AndrewDonelson/strata/router.go:344:				isNoRowsError		100.0%
 github.com/AndrewDonelson/strata/router.go:352:				populateDest		100.0%
@@ -156,7 +156,7 @@ github.com/AndrewDonelson/strata/strata.go:664:				Stats			100.0%
 github.com/AndrewDonelson/strata/strata.go:682:				Close			100.0%
 github.com/AndrewDonelson/strata/sync.go:63:				newSyncEngine		100.0%
 github.com/AndrewDonelson/strata/sync.go:73:				start			100.0%
-github.com/AndrewDonelson/strata/sync.go:92:				l1WriteWorker		87.5%
+github.com/AndrewDonelson/strata/sync.go:92:				l1WriteWorker		100.0%
 github.com/AndrewDonelson/strata/sync.go:115:				enqueueL1Write		100.0%
 github.com/AndrewDonelson/strata/sync.go:123:				stop			100.0%
 github.com/AndrewDonelson/strata/sync.go:128:				publishInvalidation	100.0%
@@ -167,4 +167,4 @@ github.com/AndrewDonelson/strata/sync.go:218:				writeBehindLoop		100.0%
 github.com/AndrewDonelson/strata/sync.go:245:				flushDirty		100.0%
 github.com/AndrewDonelson/strata/sync.go:295:				FlushDirty		100.0%
 github.com/AndrewDonelson/strata/version.go:28:				Version			0.0%
-total:									(statements)		97.5%
+total:									(statements)		98.0%

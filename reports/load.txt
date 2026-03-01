@@ -12,19 +12,19 @@
 === PAUSE TestLoad_Invalidate_Concurrent
 === RUN   TestLoad_SetMany_Concurrent
 === PAUSE TestLoad_SetMany_Concurrent
-=== CONT  TestLoad_HotKey
-=== CONT  TestLoad_SetMany_Concurrent
-=== CONT  TestLoad_ConcurrentSetDelete
-=== CONT  TestLoad_Invalidate_Concurrent
 === CONT  TestLoad_ConcurrentSetGet
---- PASS: TestLoad_SetMany_Concurrent (0.00s)
-=== CONT  TestLoad_Mixed_Operations
---- PASS: TestLoad_ConcurrentSetDelete (0.00s)
+=== CONT  TestLoad_Invalidate_Concurrent
 === CONT  TestLoad_WriteBehind_HighVolume
---- PASS: TestLoad_Invalidate_Concurrent (0.00s)
---- PASS: TestLoad_Mixed_Operations (0.01s)
+=== CONT  TestLoad_SetMany_Concurrent
+=== CONT  TestLoad_HotKey
+=== CONT  TestLoad_ConcurrentSetDelete
+=== CONT  TestLoad_Mixed_Operations
+--- PASS: TestLoad_Invalidate_Concurrent (0.01s)
+--- PASS: TestLoad_SetMany_Concurrent (0.00s)
+--- PASS: TestLoad_Mixed_Operations (0.00s)
+--- PASS: TestLoad_ConcurrentSetDelete (0.01s)
 --- PASS: TestLoad_ConcurrentSetGet (0.01s)
 --- PASS: TestLoad_HotKey (0.03s)
---- PASS: TestLoad_WriteBehind_HighVolume (0.21s)
+--- PASS: TestLoad_WriteBehind_HighVolume (0.22s)
 PASS
-ok  	github.com/AndrewDonelson/strata	1.277s
+ok  	github.com/AndrewDonelson/strata	1.282s
