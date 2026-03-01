@@ -35,6 +35,17 @@ var cmdSlicePool = sync.Pool{
 	},
 }
 
+// setArgsPool pools the []interface{} slice used to build Redis SET command
+// arguments, eliminating the make([]interface{}, 3, 5) allocation inside
+// go-redis cmdable.Set on every hot-path write.
+// The pattern mirrors cmdSlicePool used in GetMany.
+var setArgsPool = sync.Pool{
+	New: func() any {
+		s := make([]interface{}, 0, 6) // "set", key, value, "ex"/"px", ttl, (spare)
+		return &s
+	},
+}
+
 // Store is the L2 Redis cache adapter.
 type Store struct {
 	client    redis.UniversalClient
@@ -73,6 +84,40 @@ func (s *Store) key(schema, keyPrefix, id string) string {
 	return prefix + ":" + schema + ":" + id
 }
 
+// set sends a Redis SET command using a pooled args slice, avoiding the
+// make([]interface{}, 3, 5) that go-redis cmdable.Set allocates on every call.
+// The expiry logic mirrors go-redis's own usePrecise/formatMs/formatSec logic:
+//   - ttl < 1s  → PX (millisecond precision)
+//   - ttl >= 1s → EX (second precision)
+//   - ttl == redis.KeepTTL → KEEPTTL
+//   - ttl <= 0 (other) → no expiry argument
+//
+// Safety: client.Do() is synchronous — it fully encodes args to RESP and reads
+// the server response before returning.  The returned *Cmd has no external
+// references after .Err() is called, so resetting the pooled slice is safe.
+func (s *Store) set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	ap := setArgsPool.Get().(*[]interface{})
+	args := (*ap)[:0]
+	switch {
+	case ttl > 0 && ttl < time.Second: // sub-second → PX
+		args = append(args, "set", key, value, "px", ttl.Milliseconds())
+	case ttl > 0: // whole-second → EX
+		args = append(args, "set", key, value, "ex", int64(ttl.Seconds()))
+	case ttl == redis.KeepTTL: // keep existing TTL (requires Redis ≥ 6.0)
+		args = append(args, "set", key, value, "keepttl")
+	default: // ttl == 0 or negative (non-KeepTTL): persist indefinitely
+		args = append(args, "set", key, value)
+	}
+	err := s.client.Do(ctx, args...).Err()
+	// Clear element references before pooling so the GC can reclaim old values.
+	for i := range args {
+		args[i] = nil
+	}
+	*ap = args[:0]
+	setArgsPool.Put(ap)
+	return err
+}
+
 // Set stores a value in Redis with the given TTL.
 func (s *Store) Set(ctx context.Context, schema, keyPrefix, id string, value any, ttl time.Duration) error {
 	b, err := s.codec.Marshal(value)
@@ -80,7 +125,7 @@ func (s *Store) Set(ctx context.Context, schema, keyPrefix, id string, value any
 		return fmt.Errorf("l2 marshal: %w", err)
 	}
 	k := s.key(schema, keyPrefix, id)
-	if err := s.client.Set(ctx, k, b, ttl).Err(); err != nil {
+	if err := s.set(ctx, k, b, ttl); err != nil {
 		return fmt.Errorf("l2 set %s: %w", k, err)
 	}
 	return nil
@@ -146,7 +191,7 @@ func (s *Store) SetP(ctx context.Context, l2Prefix, id string, value any, ttl ti
 		return fmt.Errorf("l2 marshal: %w", err)
 	}
 	k := s.keyP(l2Prefix, id)
-	if err := s.client.Set(ctx, k, b, ttl).Err(); err != nil {
+	if err := s.set(ctx, k, b, ttl); err != nil {
 		return fmt.Errorf("l2 set %s: %w", k, err)
 	}
 	return nil

@@ -511,6 +511,65 @@ func TestL2_GetMany_RealError(t *testing.T) {
 	assert.Contains(t, err.Error(), "l2 get-many")
 }
 
+// TestL2_GetMany_LargeIdSet exercises the `cap(cmds) < len(ids)` branch that
+// was introduced when cmdSlicePool was added to GetMany.  The pool's New
+// function allocates slices with cap=16; fetching 20 IDs exceeds that
+// capacity and forces the `make([]*redis.StringCmd, 0, len(ids))` path.
+func TestL2_GetMany_LargeIdSet(t *testing.T) {
+	const N = 20 // must exceed cmdSlicePool initial cap (16)
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	ids := make([]string, N)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("largeid%02d", i)
+		require.NoError(t, s.Set(ctx, "schema", "", ids[i],
+			&testVal{ID: ids[i]}, time.Minute))
+	}
+
+	result, err := s.GetMany(ctx, "schema", "", ids)
+	require.NoError(t, err)
+	assert.Len(t, result, N, "all %d values must be returned", N)
+}
+
+// TestL2_Set_ZeroTTL covers the `default` case (ttl==0) inside set(),
+// which omits the expiry argument entirely (key persists indefinitely).
+func TestL2_Set_ZeroTTL(t *testing.T) {
+	ctx := context.Background()
+	s, mr := newTestStore(t)
+
+	require.NoError(t, s.Set(ctx, "schema", "", "noexpiry", &testVal{ID: "noexpiry"}, 0))
+
+	var got testVal
+	require.NoError(t, s.Get(ctx, "schema", "", "noexpiry", &got))
+	assert.Equal(t, "noexpiry", got.ID)
+	// miniredis TTL() returns 0 for keys with no expiry (unlike real Redis, which
+	// returns -1).  Either way the key must exist with no TTL set.
+	assert.Equal(t, time.Duration(0), mr.TTL("schema:schema:noexpiry"),
+		"zero-TTL Set must result in a persistent key with no expiry")
+}
+
+// TestL2_Set_KeepTTL covers the `ttl == redis.KeepTTL` case inside set(),
+// which appends the KEEPTTL argument so Redis retains the existing key expiry.
+func TestL2_Set_KeepTTL(t *testing.T) {
+	ctx := context.Background()
+	s, mr := newTestStore(t)
+
+	// Prime the key with a 1-hour TTL.
+	require.NoError(t, s.Set(ctx, "schema", "", "keepttl-key", &testVal{ID: "v1"}, time.Hour))
+	originalTTL := mr.TTL("schema:schema:keepttl-key")
+	require.True(t, originalTTL > 0, "key must have a positive TTL after initial Set")
+
+	// Overwrite the value with KeepTTL — the TTL must not change.
+	require.NoError(t, s.Set(ctx, "schema", "", "keepttl-key", &testVal{ID: "v2"}, redis.KeepTTL))
+
+	var got testVal
+	require.NoError(t, s.Get(ctx, "schema", "", "keepttl-key", &got))
+	assert.Equal(t, "v2", got.ID, "value must be updated")
+	assert.Equal(t, originalTTL, mr.TTL("schema:schema:keepttl-key"),
+		"KEEPTTL Set must preserve the existing key TTL")
+}
+
 func TestL2_InvalidateAll_WithKeyPrefix(t *testing.T) {
 	// Exercises the `if keyPrefix != ""` branch in InvalidateAll.
 	s, _ := newTestStore(t)
