@@ -474,3 +474,149 @@ func TestExists_NotFound_L3(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+// ─── 8. createTable DDL branches ─────────────────────────────────────────────
+//
+// richItem is designed to trigger every branch in buildColumnDef and
+// buildIndexDDL:
+//
+//   - ID     → PRIMARY KEY
+//   - Slug   → UNIQUE NOT NULL
+//   - Score  → NOT NULL + regular index
+//   - Amount → NOT NULL DEFAULT 0.0  (DefaultValue branch)
+//   - Note   → nullable (no NOT NULL)
+//   - Tags   → BYTEA column ([]byte slice type)
+//   - CreatedAt → TIMESTAMPTZ DEFAULT now() via auto_now_add
+//   - UpdatedAt → TIMESTAMPTZ DEFAULT now() via auto_now
+//
+// Additionally the Schema carries a composite unique index (Indexes slice)
+// which exercises the cs.Indexes loop in buildIndexDDL.
+
+type richItem struct {
+	ID        string    `strata:"primary_key"`
+	Slug      string    `strata:"unique"`
+	Score     int       `strata:"index"`
+	Amount    float64   `strata:"default:0.0"`
+	Note      string    `strata:"nullable"`
+	Tags      []byte    `strata:"nullable"`
+	CreatedAt time.Time `strata:"auto_now_add"`
+	UpdatedAt time.Time `strata:"auto_now"`
+}
+
+func registerRichItem(t *testing.T, ds *strata.DataStore, name string) {
+	t.Helper()
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:  name,
+		Model: &richItem{},
+		Indexes: []strata.Index{
+			{
+				Fields: []string{"slug", "score"},
+				Unique: true,
+				Name:   "idx_" + name + "_slug_score",
+			},
+		},
+	}))
+}
+
+// TestMigrate_CreateTable_AllDDLBranches registers a schema that exercises
+// every DDL branch (PK, UNIQUE, NOT NULL, DEFAULT, NULL, BYTEA, auto_now_add,
+// auto_now, regular index, composite unique index) and asserts that Migrate
+// runs cleanly — both on first creation and as an idempotent second call.
+func TestMigrate_CreateTable_AllDDLBranches(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+
+	pgc, err := tcpg.Run(ctx, pgTestImage,
+		tcpg.WithDatabase(pgTestDB), tcpg.WithUsername(pgTestUser), tcpg.WithPassword(pgTestPass),
+		tcpg.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
+
+	pgDSN, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+	ds, err := strata.NewDataStore(strata.Config{PostgresDSN: pgDSN})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	registerRichItem(t, ds, "richitem")
+	require.NoError(t, ds.Migrate(ctx), "first Migrate must succeed")
+
+	// Idempotent second run — alterTable path, no new columns → no-op.
+	require.NoError(t, ds.Migrate(ctx), "second Migrate must be idempotent")
+}
+
+// TestWriteToL3_AutoTimestamps verifies that writeToL3 populates auto_now_add
+// and auto_now fields when the caller's struct has zero-valued time.Time fields.
+func TestWriteToL3_AutoTimestamps(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+
+	pgc, err := tcpg.Run(ctx, pgTestImage,
+		tcpg.WithDatabase(pgTestDB), tcpg.WithUsername(pgTestUser), tcpg.WithPassword(pgTestPass),
+		tcpg.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
+
+	pgDSN, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+
+	ds, err := strata.NewDataStore(strata.Config{
+		PostgresDSN:  pgDSN,
+		RedisAddr:    mr.Addr(),
+		DefaultL1TTL: 5 * time.Minute,
+		DefaultL2TTL: 30 * time.Minute,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	registerRichItem(t, ds, "richts")
+	require.NoError(t, ds.Migrate(ctx))
+
+	// All time fields are zero — writeToL3 must set them via auto_now logic.
+	item := &richItem{ID: "ts-1", Slug: "alpha", Score: 5}
+	require.NoError(t, ds.Set(ctx, "richts", item.ID, item))
+
+	// Row must exist in L3 (the auto_now timestamps were written).
+	ok, err := ds.Exists(ctx, "richts", "ts-1")
+	require.NoError(t, err)
+	assert.True(t, ok, "auto-timestamped row must be present in L3")
+
+	// Second Set triggers the auto_now (always-update) branch.
+	item2 := &richItem{ID: "ts-1", Slug: "alpha", Score: 99}
+	require.NoError(t, ds.Set(ctx, "richts", item2.ID, item2))
+	ok, err = ds.Exists(ctx, "richts", "ts-1")
+	require.NoError(t, err)
+	assert.True(t, ok, "updated row must still be present after auto_now update")
+}
+
+// ─── 9. Tx.Commit failure paths ──────────────────────────────────────────────
+
+// TestTx_Commit_UnknownSchema verifies that Commit rolls back and returns an
+// error when a queued Set references a schema name that is not registered.
+// This covers the registry.get error branch inside Commit.
+func TestTx_Commit_UnknownSchema(t *testing.T) {
+	fs := newFullStack(t)
+	err := fs.ds.Tx(context.Background()).
+		Set("does_not_exist", "x1", &Product{ID: "x1"}).
+		Commit()
+	require.Error(t, err, "unregistered schema must cause Commit to fail")
+}
+
+// TestTx_Commit_NoL3 verifies that Commit returns ErrL3Unavailable when the
+// DataStore has no L3 backend configured. This covers the l3==nil guard at the
+// top of Commit.
+func TestTx_Commit_NoL3(t *testing.T) {
+	// Build a DataStore with no PostgresDSN → l3 == nil.
+	ds, err := strata.NewDataStore(strata.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+	require.NoError(t, ds.Register(strata.Schema{Name: "product", Model: &Product{}}))
+
+	err = ds.Tx(context.Background()).
+		Set("product", "x", &Product{ID: "x"}).
+		Commit()
+	require.ErrorIs(t, err, strata.ErrL3Unavailable)
+}

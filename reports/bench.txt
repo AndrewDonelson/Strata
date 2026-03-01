@@ -2,48 +2,94 @@ goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkDataStore_Set_L1-24           	 8638596	       137.9 ns/op	      16 B/op	       1 allocs/op
-BenchmarkDataStore_Get_L1_Hit-24       	 4160836	       281.8 ns/op	      64 B/op	       2 allocs/op
-BenchmarkDataStore_Get_L1_Miss-24      	 7873954	       144.4 ns/op	      72 B/op	       2 allocs/op
-BenchmarkDataStore_Delete_L1-24        	 3740668	       310.3 ns/op	     192 B/op	       4 allocs/op
-BenchmarkDataStore_GetTyped_L1-24      	 6274992	       191.6 ns/op	      64 B/op	       2 allocs/op
-BenchmarkDataStore_SetMany_L1-24       	 4053320	       301.1 ns/op	      48 B/op	       3 allocs/op
-BenchmarkDataStore_Exists-24           	16130952	        73.82 ns/op	       0 B/op	       0 allocs/op
-BenchmarkDataStore_Stats-24            	  598444	      1962 ns/op	       0 B/op	       0 allocs/op
-BenchmarkQueryBuilder_Simple-24        	66090278	        15.60 ns/op	      16 B/op	       1 allocs/op
-BenchmarkQueryBuilder_Complex-24       	29527082	        40.06 ns/op	      80 B/op	       2 allocs/op
-BenchmarkQuery_ToSQL-24                	 3226956	       363.7 ns/op	     432 B/op	       9 allocs/op
-BenchmarkAES256GCM_Encrypt-24          	 3597664	       337.4 ns/op	     864 B/op	       3 allocs/op
-BenchmarkAES256GCM_Decrypt-24          	 4348498	       278.3 ns/op	     816 B/op	       2 allocs/op
-BenchmarkDataStore_Set_Encrypted-24    	 8433912	       139.4 ns/op	      16 B/op	       1 allocs/op
-BenchmarkDataStore_SetGet_L1-24        	 4197219	       287.2 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Set_L1-24           	 8813560	       135.5 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Set_L1-24           	 8929646	       134.5 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Set_L1-24           	 8674077	       138.4 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Get_L1_Hit-24       	 3795070	       279.7 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Hit-24       	 4355218	       285.0 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Hit-24       	 4303036	       291.1 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Miss-24      	 8465720	       142.8 ns/op	      72 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Miss-24      	 8283309	       140.6 ns/op	      72 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Miss-24      	 8534751	       137.4 ns/op	      72 B/op	       2 allocs/op
+BenchmarkDataStore_Delete_L1-24        	 4144863	       282.1 ns/op	     192 B/op	       4 allocs/op
+BenchmarkDataStore_Delete_L1-24        	 4018585	       295.6 ns/op	     192 B/op	       4 allocs/op
+BenchmarkDataStore_Delete_L1-24        	 3834241	       297.0 ns/op	     192 B/op	       4 allocs/op
+BenchmarkDataStore_GetTyped_L1-24      	 6422802	       183.9 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_GetTyped_L1-24      	 6339726	       185.3 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_GetTyped_L1-24      	 6475630	       182.5 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_SetMany_L1-24       	 3972432	       301.2 ns/op	      48 B/op	       3 allocs/op
+BenchmarkDataStore_SetMany_L1-24       	 4068330	       290.9 ns/op	      48 B/op	       3 allocs/op
+BenchmarkDataStore_SetMany_L1-24       	 4136673	       291.7 ns/op	      48 B/op	       3 allocs/op
+BenchmarkDataStore_Exists-24           	16177759	        73.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Exists-24           	16245218	        73.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Exists-24           	16376677	        73.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Stats-24            	  605737	      1939 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Stats-24            	  612342	      1941 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Stats-24            	  620929	      1937 ns/op	       0 B/op	       0 allocs/op
+BenchmarkQueryBuilder_Simple-24        	65889680	        19.34 ns/op	      16 B/op	       1 allocs/op
+BenchmarkQueryBuilder_Simple-24        	89636898	        14.31 ns/op	      16 B/op	       1 allocs/op
+BenchmarkQueryBuilder_Simple-24        	89026668	        14.56 ns/op	      16 B/op	       1 allocs/op
+BenchmarkQueryBuilder_Complex-24       	32464976	        36.54 ns/op	      80 B/op	       2 allocs/op
+BenchmarkQueryBuilder_Complex-24       	32668711	        38.10 ns/op	      80 B/op	       2 allocs/op
+BenchmarkQueryBuilder_Complex-24       	24832850	        44.96 ns/op	      80 B/op	       2 allocs/op
+BenchmarkQuery_ToSQL-24                	 3445378	       351.3 ns/op	     432 B/op	       9 allocs/op
+BenchmarkQuery_ToSQL-24                	 3380085	       346.1 ns/op	     432 B/op	       9 allocs/op
+BenchmarkQuery_ToSQL-24                	 3457539	       341.3 ns/op	     432 B/op	       9 allocs/op
+BenchmarkAES256GCM_Encrypt-24          	 3899785	       299.6 ns/op	     864 B/op	       3 allocs/op
+BenchmarkAES256GCM_Encrypt-24          	 3894601	       294.6 ns/op	     864 B/op	       3 allocs/op
+BenchmarkAES256GCM_Encrypt-24          	 3847083	       302.6 ns/op	     864 B/op	       3 allocs/op
+BenchmarkAES256GCM_Decrypt-24          	 5129433	       235.2 ns/op	     816 B/op	       2 allocs/op
+BenchmarkAES256GCM_Decrypt-24          	 4947414	       235.3 ns/op	     816 B/op	       2 allocs/op
+BenchmarkAES256GCM_Decrypt-24          	 5010988	       238.2 ns/op	     816 B/op	       2 allocs/op
+BenchmarkDataStore_Set_Encrypted-24    	 8632648	       134.6 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Set_Encrypted-24    	 8790645	       135.7 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Set_Encrypted-24    	 8637332	       136.6 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_SetGet_L1-24        	 4098224	       281.7 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_SetGet_L1-24        	 4278704	       289.9 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_SetGet_L1-24        	 4002958	       295.8 ns/op	      64 B/op	       2 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata	55.352s
+ok  	github.com/AndrewDonelson/strata	63.174s
 PASS
 ok  	github.com/AndrewDonelson/strata/internal/clock	0.003s
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/codec	0.003s
+ok  	github.com/AndrewDonelson/strata/internal/codec	0.002s
 goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata/internal/l1
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkL1_Set-24             	38809363	        29.65 ns/op	       8 B/op	       0 allocs/op
-BenchmarkL1_Get_Hit-24         	43264581	        27.66 ns/op	       0 B/op	       0 allocs/op
-BenchmarkL1_Get_Parallel-24    	12422156	        97.43 ns/op	       0 B/op	       0 allocs/op
-BenchmarkL1_GetWithMeta-24     	22044962	        54.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Set-24             	37474932	        29.79 ns/op	       7 B/op	       0 allocs/op
+BenchmarkL1_Set-24             	37668411	        30.17 ns/op	       8 B/op	       0 allocs/op
+BenchmarkL1_Set-24             	39565504	        29.41 ns/op	       8 B/op	       0 allocs/op
+BenchmarkL1_Get_Hit-24         	43538985	        27.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Hit-24         	43388264	        27.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Hit-24         	42678434	        27.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Parallel-24    	11665330	       101.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Parallel-24    	12149433	       100.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Parallel-24    	11769008	        99.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_GetWithMeta-24     	22321722	        53.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_GetWithMeta-24     	21891463	        54.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_GetWithMeta-24     	22031865	        54.03 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l1	5.046s
+ok  	github.com/AndrewDonelson/strata/internal/l1	14.801s
 goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata/internal/l2
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkL2_Set-24     	   73282	     16044 ns/op	     921 B/op	      36 allocs/op
-BenchmarkL2_Get-24     	   73420	     16569 ns/op	     720 B/op	      28 allocs/op
-BenchmarkL2_SetP-24    	   69952	     16849 ns/op	     921 B/op	      36 allocs/op
-BenchmarkL2_GetP-24    	   80259	     14778 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_Set-24     	   79052	     14979 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_Set-24     	   71256	     15080 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_Set-24     	   83257	     15655 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_Get-24     	   67071	     15963 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_Get-24     	   84100	     15860 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_Get-24     	   74180	     15574 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_SetP-24    	   67610	     15125 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_SetP-24    	   78939	     16198 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_SetP-24    	   75330	     14851 ns/op	     922 B/op	      36 allocs/op
+BenchmarkL2_GetP-24    	   82857	     15387 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_GetP-24    	   73071	     16321 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_GetP-24    	   74149	     16187 ns/op	     720 B/op	      28 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l2	5.438s
+ok  	github.com/AndrewDonelson/strata/internal/l2	17.152s
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l3	30.786s
+ok  	github.com/AndrewDonelson/strata/internal/l3	0.028s
 PASS
 ok  	github.com/AndrewDonelson/strata/internal/metrics	0.002s

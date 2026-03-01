@@ -248,6 +248,104 @@ func TestL2_KeyPrefix_SchemaOverride(t *testing.T) {
 	assert.Equal(t, "schema-prefix-test", got.Value)
 }
 
+// ── Keyed (P) variants ───────────────────────────────────────────────────────
+// These test SetP / GetP / ExistsP / DeleteP which accept a pre-computed key
+// prefix (stored once in compiledSchema.l2Prefix) to skip a string concat on
+// every hot-path call.
+
+func TestL2P_SetGet(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	prefix := "schema:schema:" // mirrors compiledSchema.l2Prefix
+	val := &testVal{ID: "p1", Value: "pipeline", Score: 77}
+	require.NoError(t, s.SetP(ctx, prefix, "p1", val, time.Minute))
+
+	var got testVal
+	require.NoError(t, s.GetP(ctx, prefix, "p1", &got))
+	assert.Equal(t, *val, got)
+}
+
+func TestL2P_GetP_Miss(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	var got testVal
+	err := s.GetP(ctx, "schema:schema:", "missing", &got)
+	require.ErrorIs(t, err, l2.ErrMiss)
+	assert.Empty(t, got.ID)
+}
+
+func TestL2P_ExistsP_Present(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	prefix := "ep:ep:"
+	require.NoError(t, s.SetP(ctx, prefix, "x1", &testVal{ID: "x1"}, time.Minute))
+	ok, err := s.ExistsP(ctx, prefix, "x1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestL2P_ExistsP_Absent(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	ok, err := s.ExistsP(ctx, "ep:ep:", "absent")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestL2P_DeleteP(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+
+	prefix := "dp:dp:"
+	require.NoError(t, s.SetP(ctx, prefix, "d1", &testVal{ID: "d1"}, time.Minute))
+	require.NoError(t, s.DeleteP(ctx, prefix, "d1"))
+
+	ok, err := s.ExistsP(ctx, prefix, "d1")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestL2P_DeleteP_NonExistent(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	// Deleting a missing key via DeleteP must not error.
+	assert.NoError(t, s.DeleteP(ctx, "dp:dp:", "ghost"))
+}
+
+func TestL2P_SetP_GetP_WithGlobalKeyPrefix(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	// KeyPrefix exercises the s.keyPrefix != "" branch inside keyP.
+	s := l2.New(l2.Options{Client: client, Codec: codec.JSON{}, KeyPrefix: "myapp"})
+
+	ctx := context.Background()
+	prefix := "schema:schema:"
+	val := &testVal{ID: "gp1", Value: "prefixed", Score: 3}
+	require.NoError(t, s.SetP(ctx, prefix, "gp1", val, time.Minute))
+
+	var got testVal
+	require.NoError(t, s.GetP(ctx, prefix, "gp1", &got))
+	assert.Equal(t, val.Value, got.Value)
+
+	// ExistsP and DeleteP must round-trip through the same prefixed key.
+	ok, err := s.ExistsP(ctx, prefix, "gp1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	require.NoError(t, s.DeleteP(ctx, prefix, "gp1"))
+	ok, err = s.ExistsP(ctx, prefix, "gp1")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
 // ── Benchmarks ────────────────────────────────────────────────────────────────
 
 func BenchmarkL2_Set(b *testing.B) {
