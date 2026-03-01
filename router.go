@@ -136,10 +136,9 @@ func (ds *DataStore) routerSetL1Async(ctx context.Context, cs *compiledSchema, i
 	if ds.l2 != nil {
 		_ = ds.setL2(ctx, cs, id, value)
 	}
-	// L1 asynchronously
+	// L1 asynchronously via pooled worker — avoids unbounded goroutine creation.
 	if ds.l1 != nil {
-		key := cs.l1Prefix + id
-		go ds.setL1(cs, key, value)
+		ds.sync.enqueueL1Write(cs, cs.l1Prefix+id, value)
 	}
 	if ds.sync != nil {
 		ds.sync.publishInvalidation(ctx, cs.Name, id, "set")

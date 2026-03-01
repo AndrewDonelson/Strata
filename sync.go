@@ -3,7 +3,6 @@ package strata
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +17,15 @@ type invalidationMsg struct {
 	Op     string `json:"op"` // "set" | "delete" | "invalidate_all"
 }
 
+// l1WriteOp is a queued asynchronous write to the in-process L1 cache.
+// The syncEngine drains these via a single pooled worker so that
+// WriteThroughL1Async never spawns an unbounded number of goroutines.
+type l1WriteOp struct {
+	cs    *compiledSchema
+	key   string
+	value any
+}
+
 // dirtyEntry holds a value pending write-behind flush to L3.
 type dirtyEntry struct {
 	schemaName string
@@ -27,7 +35,8 @@ type dirtyEntry struct {
 	lastErr    error
 }
 
-// syncEngine manages L1 invalidation (Redis pub/sub) and write-behind flushing.
+// syncEngine manages L1 invalidation (Redis pub/sub), write-behind flushing,
+// and the pooled L1 async-write worker.
 type syncEngine struct {
 	ds         *DataStore
 	dirtyMu    sync.Mutex
@@ -35,19 +44,31 @@ type syncEngine struct {
 	dirtyCount atomic.Int64
 	stopCh     chan struct{}
 	flushCh    chan struct{}
+	l1WriteCh  chan l1WriteOp // bounded FIFO for WriteThroughL1Async
 	wg         sync.WaitGroup
 }
 
+// l1WriteBufSize is the capacity of the L1 async-write channel.
+// Sized to absorb bursts without blocking writers; drops are safe because
+// a missing L1 entry is always re-populated from L2/L3 on the next read.
+const l1WriteBufSize = 512
+
 func newSyncEngine(ds *DataStore) *syncEngine {
 	return &syncEngine{
-		ds:      ds,
-		dirty:   make(map[string]*dirtyEntry),
-		stopCh:  make(chan struct{}),
-		flushCh: make(chan struct{}, 1),
+		ds:        ds,
+		dirty:     make(map[string]*dirtyEntry),
+		stopCh:    make(chan struct{}),
+		flushCh:   make(chan struct{}, 1),
+		l1WriteCh: make(chan l1WriteOp, l1WriteBufSize),
 	}
 }
 
 func (se *syncEngine) start() {
+	// L1 async-write worker — always started so WriteThroughL1Async
+	// has a ready consumer without spawning per-call goroutines.
+	se.wg.Add(1)
+	go se.l1WriteWorker()
+
 	if se.ds.l2 != nil {
 		se.wg.Add(1)
 		go se.subscribeLoop()
@@ -55,6 +76,40 @@ func (se *syncEngine) start() {
 	if se.ds.cfg.DefaultWriteMode == WriteBehind {
 		se.wg.Add(1)
 		go se.writeBehindLoop()
+	}
+}
+
+// l1WriteWorker drains the l1WriteCh channel, applying each write to the
+// in-process L1 shard.  A single goroutine is sufficient because L1 is
+// a sharded sync.Map — the worker itself is not a bottleneck.
+func (se *syncEngine) l1WriteWorker() {
+	defer se.wg.Done()
+	for {
+		select {
+		case op := <-se.l1WriteCh:
+			se.ds.setL1(op.cs, op.key, op.value)
+		case <-se.stopCh:
+			// Drain any remaining ops before exiting.
+			for {
+				select {
+				case op := <-se.l1WriteCh:
+					se.ds.setL1(op.cs, op.key, op.value)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// enqueueL1Write sends an L1 write to the worker channel.
+// If the channel is full the write is dropped — a cache miss on the next
+// read is preferable to blocking the caller.
+func (se *syncEngine) enqueueL1Write(cs *compiledSchema, key string, value any) {
+	select {
+	case se.l1WriteCh <- l1WriteOp{cs: cs, key: key, value: value}:
+	default:
+		// channel full — drop; L1 will warm on next read
 	}
 }
 
@@ -127,7 +182,7 @@ func (se *syncEngine) handleInvalidation(payload string) {
 	}
 	switch msg.Op {
 	case "set", "delete":
-		se.ds.l1.Delete(fmt.Sprintf("%s:%s", msg.Schema, msg.ID))
+		se.ds.l1.Delete(msg.Schema + ":" + msg.ID)
 	case "invalidate_all":
 		se.ds.l1.FlushSchema(msg.Schema + ":")
 	}
