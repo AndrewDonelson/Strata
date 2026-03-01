@@ -451,3 +451,71 @@ func TestL3_ConcurrentUpsert(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(20), n)
 }
+
+// ── Error paths — non-existent table triggers real DB errors ─────────────────
+//
+// Using a non-existent table produces a Postgres "relation does not exist"
+// error. This is distinct from "no rows" and exercises every error-return
+// path that the happy-path tests never reach.
+
+func TestL3_Upsert_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	err := store.Upsert(context.Background(), "no_such_table",
+		[]string{"id", "name"}, []any{"e1", "oops"}, "id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 upsert")
+}
+
+func TestL3_DeleteByID_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	err := store.DeleteByID(context.Background(), "no_such_table", "id", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 delete")
+}
+
+func TestL3_Query_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	_, err := store.Query(context.Background(), "SELECT * FROM no_such_table", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 query")
+}
+
+func TestL3_QueryPrimary_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	_, err := store.QueryPrimary(context.Background(), "SELECT * FROM no_such_table", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 query-primary")
+}
+
+func TestL3_CopyFromRows_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	src := l3.CopyFromSlice([][]any{{"x1", "Name", 1}})
+	_, err := store.CopyFromRows(context.Background(),
+		"no_such_table", []string{"id", "name", "value"}, src)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 copy")
+}
+
+// TestL3_Exists_RealError verifies the non-"no rows" error path in Exists.
+// A missing TABLE (not a missing row) produces "relation does not exist",
+// which isNoRows() correctly returns false for, triggering the error return.
+func TestL3_Exists_RealError(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	_, err := store.Exists(context.Background(), "no_such_table", "id", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 exists")
+}
+
+func TestL3_Count_Error(t *testing.T) {
+	store, _, cleanup := setupPG(t)
+	defer cleanup()
+	_, err := store.Count(context.Background(), "no_such_table", "", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l3 count")
+}

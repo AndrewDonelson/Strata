@@ -250,3 +250,37 @@ func TestGetFieldValue_IntType(t *testing.T) {
 	v := reflect.ValueOf(m).Elem()
 	assert.Equal(t, 99, l3.GetFieldValue(v, ageCol))
 }
+
+// ── goTypeToSQL — exotic / default branches ───────────────────────────────────
+//
+// Three branches in goTypeToSQL are not exercised by the AllTypes fixture:
+//
+//   1. Pointer-dereference loop   (*string → TEXT)
+//   2. Non-time.Time struct field (struct{X int} → JSONB)
+//   3. Default case               (chan int → TEXT)
+//
+// ExoticTypes is purpose-built to hit all three.
+
+type ExoticTypes struct {
+	ID    string          `strata:"primary_key"`
+	Ptr   *string         // pointer → loops t = t.Elem() then maps to TEXT
+	Inner struct{ X int } // non-time struct → JSONB
+	Ch    chan int        // chan kind falls through to default → TEXT
+}
+
+func TestReflectSchema_ExoticTypes(t *testing.T) {
+	cols, err := l3.ReflectSchema(&ExoticTypes{})
+	require.NoError(t, err)
+
+	byName := make(map[string]l3.ColumnDef)
+	for _, c := range cols {
+		byName[c.Name] = c
+	}
+
+	// *string: pointer dereferenced → underlying TEXT
+	assert.Equal(t, "TEXT", byName["ptr"].SQLType, "pointer to string should resolve to TEXT")
+	// struct{X int}: non-time.Time struct → JSONB
+	assert.Equal(t, "JSONB", byName["inner"].SQLType, "non-time.Time struct should map to JSONB")
+	// chan int: not in any explicit switch case → default TEXT
+	assert.Equal(t, "TEXT", byName["ch"].SQLType, "chan type should fall through to default TEXT")
+}

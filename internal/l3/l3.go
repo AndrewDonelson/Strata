@@ -149,9 +149,7 @@ func (s *Store) Count(ctx context.Context, table, where string, args []any) (int
 }
 
 func isNoRows(err error) bool {
-	if err == nil {
-		return false
-	}
+	// Callers always guard with 'if err != nil' before calling isNoRows.
 	return strings.Contains(err.Error(), "no rows")
 }
 

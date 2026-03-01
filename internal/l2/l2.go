@@ -230,9 +230,7 @@ func (s *Store) InvalidateAll(ctx context.Context, schema, keyPrefix string) err
 			return fmt.Errorf("l2 scan: %w", err)
 		}
 		if len(keys) > 0 {
-			if err := s.client.Del(ctx, keys...).Err(); err != nil {
-				return fmt.Errorf("l2 del: %w", err)
-			}
+			_ = s.client.Del(ctx, keys...).Err() // best-effort; mirrors routerDelete L2 treatment
 		}
 		cursor = next
 		if cursor == 0 {

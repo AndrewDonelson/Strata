@@ -2,6 +2,7 @@ package l2_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -344,6 +345,217 @@ func TestL2P_SetP_GetP_WithGlobalKeyPrefix(t *testing.T) {
 	ok, err = s.ExistsP(ctx, prefix, "gp1")
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+// ── Error and edge-case paths ─────────────────────────────────────────────────
+
+// brokenStore returns a Store whose Redis connection is permanently dead.
+// We start a miniredis, capture its address, close it, then build a client
+// pointing at the now-closed port with a short dial timeout.
+// All operations on this store must return a real connection error (not ErrMiss).
+func brokenStore(t *testing.T) *l2.Store {
+	t.Helper()
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	addr := mr.Addr() // save before closing
+	mr.Close()        // nothing listening at addr anymore
+
+	client := redis.NewClient(&redis.Options{
+		Addr:        addr,
+		DialTimeout: 50 * time.Millisecond,
+		ReadTimeout: 50 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	return l2.New(l2.Options{Client: client, Codec: codec.JSON{}})
+}
+
+func TestL2_New_NilCodec(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	// Nil Codec must default to MsgPack internally.
+	s := l2.New(l2.Options{Client: client, Codec: nil})
+	ctx := context.Background()
+	val := &testVal{ID: "nc1", Value: "default-codec", Score: 1}
+	require.NoError(t, s.Set(ctx, "schema", "", "nc1", val, time.Minute))
+	var got testVal
+	require.NoError(t, s.Get(ctx, "schema", "", "nc1", &got))
+	assert.Equal(t, val.ID, got.ID)
+}
+
+func TestL2_Set_MarshalError(t *testing.T) {
+	s, _ := newTestStore(t) // uses JSON codec
+	// channels cannot be JSON-marshaled → codec.Marshal returns an error
+	err := s.Set(context.Background(), "schema", "", "bad", make(chan int), time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "marshal")
+}
+
+func TestL2_Set_RedisError(t *testing.T) {
+	// Covers the redis client.Set error-return path in Set.
+	s := brokenStore(t)
+	err := s.Set(context.Background(), "schema", "", "x", &testVal{ID: "x"}, time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l2 set")
+}
+
+func TestL2_Get_RealError(t *testing.T) {
+	s := brokenStore(t)
+	var got testVal
+	err := s.Get(context.Background(), "schema", "", "x", &got)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, l2.ErrMiss), "connection error must not masquerade as a cache miss")
+}
+
+func TestL2_Get_UnmarshalError(t *testing.T) {
+	// Covers the codec.Unmarshal error path in Get.
+	// Store raw invalid JSON and then try to decode it with the JSON codec.
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	// Key = s.key("schema", "", "corrupt") = "schema:schema:corrupt"
+	require.NoError(t, s.SetRaw(ctx, "schema:schema:corrupt", []byte("NOT VALID JSON"), time.Minute))
+	var got testVal
+	err := s.Get(ctx, "schema", "", "corrupt", &got)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal")
+}
+
+func TestL2_Exists_Error(t *testing.T) {
+	s := brokenStore(t)
+	_, err := s.Exists(context.Background(), "schema", "", "x")
+	require.Error(t, err)
+}
+
+func TestL2_Delete_Error(t *testing.T) {
+	s := brokenStore(t)
+	err := s.Delete(context.Background(), "schema", "", "x")
+	require.Error(t, err)
+}
+
+func TestL2P_SetP_MarshalError(t *testing.T) {
+	s, _ := newTestStore(t)
+	err := s.SetP(context.Background(), "schema:schema:", "bad", make(chan int), time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "marshal")
+}
+
+func TestL2P_SetP_RedisError(t *testing.T) {
+	// Covers the redis client.Set error-return path in SetP.
+	s := brokenStore(t)
+	err := s.SetP(context.Background(), "schema:schema:", "x", &testVal{ID: "x"}, time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l2 set")
+}
+
+func TestL2P_GetP_RealError(t *testing.T) {
+	s := brokenStore(t)
+	var got testVal
+	err := s.GetP(context.Background(), "schema:schema:", "x", &got)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, l2.ErrMiss))
+}
+
+func TestL2P_GetP_UnmarshalError(t *testing.T) {
+	// Covers the codec.Unmarshal error path in GetP.
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	// Key = s.keyP("schema:schema:", "corrupt") = "schema:schema:corrupt"
+	require.NoError(t, s.SetRaw(ctx, "schema:schema:corrupt", []byte("NOT VALID JSON"), time.Minute))
+	var got testVal
+	err := s.GetP(ctx, "schema:schema:", "corrupt", &got)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal")
+}
+
+func TestL2P_ExistsP_Error(t *testing.T) {
+	s := brokenStore(t)
+	_, err := s.ExistsP(context.Background(), "schema:schema:", "x")
+	require.Error(t, err)
+}
+
+func TestL2P_DeleteP_Error(t *testing.T) {
+	s := brokenStore(t)
+	err := s.DeleteP(context.Background(), "schema:schema:", "x")
+	require.Error(t, err)
+}
+
+func TestL2_SetMany_MarshalError(t *testing.T) {
+	s, _ := newTestStore(t)
+	kvs := []l2.KV{
+		{ID: "ok", Value: &testVal{ID: "ok"}},
+		{ID: "bad", Value: make(chan int)}, // JSON cannot marshal channels
+	}
+	err := s.SetMany(context.Background(), "schema", "", kvs, time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "marshal")
+}
+
+func TestL2_GetMany_RealError(t *testing.T) {
+	// go-redis v9 reports connection-level pipeline failures as redis.Nil on
+	// individual commands, so we can't use a broken connection here.
+	// Instead we trigger a WRONGTYPE error: store a LIST under the key that
+	// GetMany will try to GET as a string.  The pipeline returns the WRONGTYPE
+	// error which is NOT redis.Nil, exercising the error-return path.
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+
+	// key = s.key("schema", "", "bad") = "schema:schema:bad"
+	mr.Lpush("schema:schema:bad", "item")
+
+	_, err := s.GetMany(ctx, "schema", "", []string{"bad"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l2 get-many")
+}
+
+func TestL2_InvalidateAll_WithKeyPrefix(t *testing.T) {
+	// Exercises the `if keyPrefix != ""` branch in InvalidateAll.
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("kp%d", i)
+		require.NoError(t, s.Set(ctx, "things", "things-v2", id, &testVal{ID: id}, time.Minute))
+	}
+	require.NoError(t, s.InvalidateAll(ctx, "things", "things-v2"))
+	for i := 0; i < 3; i++ {
+		ok, err := s.Exists(ctx, "things", "things-v2", fmt.Sprintf("kp%d", i))
+		require.NoError(t, err)
+		assert.False(t, ok, "key kp%d should have been invalidated", i)
+	}
+}
+
+func TestL2_InvalidateAll_WithGlobalKeyPrefix(t *testing.T) {
+	// Exercises the `if s.keyPrefix != ""` branch in InvalidateAll.
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	s := l2.New(l2.Options{Client: client, Codec: codec.JSON{}, KeyPrefix: "app"})
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("gp%d", i)
+		require.NoError(t, s.Set(ctx, "things", "", id, &testVal{ID: id}, time.Minute))
+	}
+	require.NoError(t, s.InvalidateAll(ctx, "things", ""))
+	for i := 0; i < 3; i++ {
+		ok, err := s.Exists(ctx, "things", "", fmt.Sprintf("gp%d", i))
+		require.NoError(t, err)
+		assert.False(t, ok, "key gp%d should have been invalidated", i)
+	}
+}
+
+func TestL2_InvalidateAll_ScanError(t *testing.T) {
+	// Exercises the scan-error return path in InvalidateAll.
+	s := brokenStore(t)
+	err := s.InvalidateAll(context.Background(), "schema", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l2 scan")
 }
 
 // ── Benchmarks ────────────────────────────────────────────────────────────────
