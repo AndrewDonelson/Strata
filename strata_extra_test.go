@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AndrewDonelson/strata"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -387,4 +388,63 @@ func TestDataStore_L1_OnEvict_Hook(t *testing.T) {
 	require.NoError(t, ds.Set(ctx, "evict_test", "e2", &Product{ID: "e2"}))
 	var p Product
 	assert.NoError(t, ds.Get(ctx, "evict_test", "e2", &p))
+}
+
+// ── GetTyped error path ───────────────────────────────────────────────────────
+
+// TestGetTyped_ErrorPropagates covers the `return nil, err` branch in GetTyped
+// (the function has been stuck at 75.0% for 4 rounds because only the success
+// path was ever exercised).
+func TestGetTyped_ErrorPropagates(t *testing.T) {
+	ds := newDS(t)
+	registerProduct(t, ds)
+
+	result, err := strata.GetTyped[Product](context.Background(), ds, "product", "does-not-exist")
+	require.ErrorIs(t, err, strata.ErrNotFound,
+		"missing key must return ErrNotFound via GetTyped")
+	assert.Nil(t, result)
+}
+
+// ── routerGet: genuine L2 error logged as warning ────────────────────────────
+
+// TestRouterGet_GenuineL2Error_LogsWarning exercises the `ds.logger.Warn` call
+// inside routerGet when L2 returns a genuine connection error (not ErrMiss).
+// The branch has never been covered because all existing tests use a live
+// miniredis which either returns valid data or redis.Nil — never a transport
+// error.  We trigger it by closing miniredis after the Set so that the
+// subsequent Get gets a connection-refused-style error from the L2 layer.
+func TestRouterGet_GenuineL2Error_LogsWarning(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	// NOTE: We deliberately do NOT defer mr.Close() here; we close it manually
+	// mid-test to trigger the genuine L2 error path.
+
+	ds, err := strata.NewDataStore(strata.Config{RedisAddr: mr.Addr()})
+	require.NoError(t, err)
+	defer ds.Close()
+
+	s := strata.Schema{
+		Name:  "l2_genuine_err",
+		Model: &Product{},
+		L1:    strata.MemPolicy{TTL: 5 * time.Millisecond},
+		L2:    strata.RedisPolicy{TTL: time.Minute},
+	}
+	require.NoError(t, ds.Register(s))
+
+	ctx := context.Background()
+	p := &Product{ID: "ge1", Name: "GenuineErrItem", Price: 1}
+	require.NoError(t, ds.Set(ctx, "l2_genuine_err", "ge1", p))
+
+	// Let L1 TTL expire so the next Get misses L1 and hits L2.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close miniredis — next L2 call will get a genuine connection error,
+	// causing logger.Warn to be called inside routerGet.
+	mr.Close()
+
+	var got Product
+	err = ds.Get(ctx, "l2_genuine_err", "ge1", &got)
+	// No L3 configured → after genuine L2 error and fall-through, ErrNotFound.
+	assert.ErrorIs(t, err, strata.ErrNotFound,
+		"genuine L2 error should not surface as a Redis error; fall-through returns ErrNotFound")
 }

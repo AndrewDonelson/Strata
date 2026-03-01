@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/AndrewDonelson/strata/internal/codec"
@@ -23,6 +24,16 @@ import (
 // Callers use errors.Is(err, l2.ErrMiss) to distinguish a cache miss from a
 // genuine Redis error.
 var ErrMiss = errors.New("l2: miss")
+
+// cmdSlicePool pools []*redis.StringCmd slices to eliminate the per-call
+// make() allocation inside GetMany.  Slices are reset to zero length before
+// pooling so that the GC can collect any stale *StringCmd references.
+var cmdSlicePool = sync.Pool{
+	New: func() any {
+		s := make([]*redis.StringCmd, 0, 16)
+		return &s
+	},
+}
 
 // Store is the L2 Redis cache adapter.
 type Store struct {
@@ -202,7 +213,24 @@ func (s *Store) SetMany(ctx context.Context, schema, keyPrefix string, kvs []KV,
 // Returns a map of id -> raw bytes; missing keys are absent.
 func (s *Store) GetMany(ctx context.Context, schema, keyPrefix string, ids []string) (map[string][]byte, error) {
 	pipe := s.client.Pipeline()
-	cmds := make([]*redis.StringCmd, len(ids))
+
+	// Borrow a *redis.StringCmd slice from the pool to avoid a per-call
+	// make() allocation.  We clear the slice before returning it so that
+	// stale *StringCmd pointers do not prevent GC of those objects.
+	sp := cmdSlicePool.Get().(*[]*redis.StringCmd)
+	cmds := (*sp)[:0]
+	if cap(cmds) < len(ids) {
+		cmds = make([]*redis.StringCmd, 0, len(ids))
+	}
+	cmds = cmds[:len(ids)]
+	defer func() {
+		for i := range cmds {
+			cmds[i] = nil // clear refs so GC can collect the StringCmd values
+		}
+		*sp = cmds[:0]
+		cmdSlicePool.Put(sp)
+	}()
+
 	for i, id := range ids {
 		cmds[i] = pipe.Get(ctx, s.key(schema, keyPrefix, id))
 	}

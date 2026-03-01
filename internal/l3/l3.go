@@ -162,3 +162,7 @@ func isNoRows(err error) bool {
 
 // Pool returns the underlying primary connection pool.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// Close shuts down the underlying connection pool.
+// Satisfies the l3Backend interface consumed by the top-level DataStore.
+func (s *Store) Close() { s.pool.Close() }

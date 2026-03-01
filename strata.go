@@ -20,6 +20,7 @@ import (
 	"github.com/AndrewDonelson/strata/internal/l2"
 	"github.com/AndrewDonelson/strata/internal/l3"
 	"github.com/AndrewDonelson/strata/internal/metrics"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -127,6 +128,28 @@ func (c *Config) defaults() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// l3Backend — private interface that *l3.Store satisfies
+// ────────────────────────────────────────────────────────────────────────────
+
+// l3Backend is the private persistence interface satisfied by *l3.Store and
+// by test mocks. Extracting it lets unit tests inject deliberate L3 failures
+// without a live PostgreSQL instance.
+type l3Backend interface {
+	Upsert(ctx context.Context, table string, columns []string, values []any, pkColumn string) error
+	DeleteByID(ctx context.Context, table, pkColumn string, id any) error
+	Query(ctx context.Context, sql string, args []any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args []any) pgx.Row
+	Exec(ctx context.Context, sql string, args []any) error
+	Exists(ctx context.Context, table, pkColumn string, id any) (bool, error)
+	Count(ctx context.Context, table, where string, args []any) (int64, error)
+	BeginTx(ctx context.Context) (pgx.Tx, error)
+	Close()
+}
+
+// Compile-time assertion: *l3.Store must implement l3Backend.
+var _ l3Backend = (*l3.Store)(nil)
+
+// ────────────────────────────────────────────────────────────────────────────
 // Stats
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -157,7 +180,7 @@ type DataStore struct {
 	registry  *schemaRegistry
 	l1        *l1.Store
 	l2        *l2.Store
-	l3        *l3.Store
+	l3        l3Backend
 	sync      *syncEngine
 	stats     storeStats
 	metrics   metrics.MetricsRecorder
@@ -667,7 +690,7 @@ func (ds *DataStore) Close() error {
 		ds.l1.Close()
 	}
 	if ds.l3 != nil {
-		ds.l3.Pool().Close()
+		ds.l3.Close()
 	}
 	return nil
 }

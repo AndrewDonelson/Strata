@@ -620,3 +620,137 @@ func TestTx_Commit_NoL3(t *testing.T) {
 		Commit()
 	require.ErrorIs(t, err, strata.ErrL3Unavailable)
 }
+
+// ─── 10. Migration — nullable+default and multi-index schemas ─────────────────
+//
+// The migrate.createTable function has been stuck at 53.3% for two rounds.
+// The review identifies two additional schema shapes that ensure every column
+// modifier branch in buildColumnDef/buildIndexDDL is exercised against a real
+// Postgres server:
+//
+//   ConfigEntry  — nullable string + integer with DEFAULT 0
+//   EventLog     — two independently indexed string columns + auto_now_add
+
+// configEntry has a nullable Value column and a Priority column with a default.
+type configEntry struct {
+	ID       string `strata:"primary_key"`
+	Value    string `strata:"nullable"`
+	Priority int    `strata:"default:0"`
+}
+
+// eventLog has two independent indexed columns and an auto_now_add timestamp.
+type eventLog struct {
+	ID        string    `strata:"primary_key"`
+	PlayerID  string    `strata:"index"`
+	EventType string    `strata:"index"`
+	CreatedAt time.Time `strata:"auto_now_add"`
+}
+
+// TestMigrate_ConfigEntry_NullableAndDefault registers and migrates a schema that
+// has a nullable column and a column with a DEFAULT value against real Postgres.
+// Second Migrate call verifies the alterTable (no new columns) idempotent path.
+func TestMigrate_ConfigEntry_NullableAndDefault(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+
+	pgc, err := tcpg.Run(ctx, pgTestImage,
+		tcpg.WithDatabase(pgTestDB), tcpg.WithUsername(pgTestUser), tcpg.WithPassword(pgTestPass),
+		tcpg.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
+
+	pgDSN, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+	ds, err := strata.NewDataStore(strata.Config{PostgresDSN: pgDSN})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:  "config_entry",
+		Model: &configEntry{},
+	}))
+
+	// First Migrate: creates the table with nullable and default columns.
+	require.NoError(t, ds.Migrate(ctx), "first Migrate must succeed")
+
+	// Second Migrate: alterTable path with no new columns → no-op.
+	require.NoError(t, ds.Migrate(ctx), "second Migrate must be idempotent")
+
+	// Migration status must record one 'create_table' row.
+	records, err := ds.MigrationStatus(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, records)
+}
+
+// TestMigrate_EventLog_MultipleIndexes registers and migrates a schema with two
+// independently indexed columns, exercising the loop in buildIndexDDL that
+// generates CREATE INDEX statements for each indexed non-PK column.
+func TestMigrate_EventLog_MultipleIndexes(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+
+	pgc, err := tcpg.Run(ctx, pgTestImage,
+		tcpg.WithDatabase(pgTestDB), tcpg.WithUsername(pgTestUser), tcpg.WithPassword(pgTestPass),
+		tcpg.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
+
+	pgDSN, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+	ds, err := strata.NewDataStore(strata.Config{PostgresDSN: pgDSN})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:  "event_log",
+		Model: &eventLog{},
+	}))
+
+	require.NoError(t, ds.Migrate(ctx), "Migrate with two indexed columns must succeed")
+
+	// Verify the migration was recorded.
+	records, err := ds.MigrationStatus(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, records)
+}
+
+// TestMigrate_AlterTable_AddsNullableColumn extends an existing table with a
+// nullable column to cover the alterTable ADD COLUMN path for nullable fields.
+func TestMigrate_AlterTable_AddsNullableColumn(t *testing.T) {
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ctx := context.Background()
+
+	pgc, err := tcpg.Run(ctx, pgTestImage,
+		tcpg.WithDatabase(pgTestDB), tcpg.WithUsername(pgTestUser), tcpg.WithPassword(pgTestPass),
+		tcpg.BasicWaitStrategies(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
+
+	pgDSN, _ := pgc.ConnectionString(ctx, "sslmode=disable")
+
+	// v1: minimal schema.
+	ds1, err := strata.NewDataStore(strata.Config{PostgresDSN: pgDSN})
+	require.NoError(t, err)
+	require.NoError(t, ds1.Register(strata.Schema{
+		Name: "alt_nullable",
+		Model: &struct {
+			ID string `strata:"primary_key"`
+		}{},
+	}))
+	require.NoError(t, ds1.Migrate(ctx))
+	ds1.Close()
+
+	// v2: adds a nullable Note column → triggers alterTable ADD COLUMN.
+	ds2, err := strata.NewDataStore(strata.Config{PostgresDSN: pgDSN})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds2.Close() })
+	require.NoError(t, ds2.Register(strata.Schema{
+		Name: "alt_nullable",
+		Model: &struct {
+			ID   string `strata:"primary_key"`
+			Note string `strata:"nullable"`
+		}{},
+	}))
+	require.NoError(t, ds2.Migrate(ctx), "alterTable with nullable column must succeed")
+}

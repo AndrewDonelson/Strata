@@ -246,3 +246,39 @@ func TestSync_HandleInvalidation_InvalidateAll_CrossStore(t *testing.T) {
 	st := ds2.Stats()
 	assert.GreaterOrEqual(t, st.L1Entries, int64(0))
 }
+
+// ── Concurrent FlushDirty ─────────────────────────────────────────────────────
+
+// TestSync_FlushDirty_ConcurrentCalls launches two goroutines that both call
+// FlushDirty at the same time.  The second goroutine will find the dirty map
+// empty after the first has already swapped out a snapshot, so it exercises the
+// early-return (empty map) branch, which has been stuck for 4 rounds.
+func TestSync_FlushDirty_ConcurrentCalls(t *testing.T) {
+	ds, _ := newDSWithRedis(t)
+
+	type Item struct {
+		ID  string `strata:"primary_key"`
+		Val string
+	}
+	require.NoError(t, ds.Register(strata.Schema{
+		Name:      "wb_concurrent",
+		Model:     &Item{},
+		WriteMode: strata.WriteBehind,
+	}))
+
+	ctx := context.Background()
+	// Seed several dirty entries.
+	for i := 0; i < 5; i++ {
+		id := "c" + string(rune('a'+i))
+		_ = ds.Set(ctx, "wb_concurrent", id, &Item{ID: id, Val: "v"})
+	}
+
+	// Fire two concurrent FlushDirty calls; one races the other.
+	errCh := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { errCh <- ds.FlushDirty(ctx) }()
+	}
+	for i := 0; i < 2; i++ {
+		assert.NoError(t, <-errCh)
+	}
+}
