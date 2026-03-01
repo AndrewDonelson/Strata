@@ -2,10 +2,13 @@ package strata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"time"
+
+	l2pkg "github.com/AndrewDonelson/strata/internal/l2"
 )
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -42,15 +45,20 @@ func (ds *DataStore) routerGet(ctx context.Context, cs *compiledSchema, id strin
 	}
 	ds.metrics.RecordMiss(cs.Name, "l1")
 
-	// L2 hit
+	// L2 — ErrMiss means key absent (fall through); other errors also fall through.
 	if ds.l2 != nil {
-		if err := ds.l2.Get(ctx, cs.Name, "", id, dest); err == nil {
+		if err := ds.l2.GetP(ctx, cs.l2Prefix, id, dest); err == nil {
 			ds.metrics.RecordHit(cs.Name, "l2")
 			// back-fill L1
 			if ds.l1 != nil {
 				ds.setL1(cs, l1Key, dest)
 			}
 			return nil
+		} else if !errors.Is(err, l2pkg.ErrMiss) {
+			// Genuine Redis error — log and fall through to L3.
+			if ds.logger != nil {
+				ds.logger.Warn("strata: l2 get error", "schema", cs.Name, "id", id, "err", err)
+			}
 		}
 	}
 	ds.metrics.RecordMiss(cs.Name, "l2")
@@ -156,7 +164,7 @@ func (ds *DataStore) routerDelete(ctx context.Context, cs *compiledSchema, id st
 		ds.l1.Delete(l1Key)
 	}
 	if ds.l2 != nil {
-		_ = ds.l2.Delete(ctx, cs.Name, "", id)
+		_ = ds.l2.DeleteP(ctx, cs.l2Prefix, id)
 	}
 	if ds.l3 != nil {
 		if err := ds.l3.DeleteByID(ctx, cs.tableName, cs.pkColumn.Name, id); err != nil {
@@ -176,6 +184,10 @@ func (ds *DataStore) routerDelete(ctx context.Context, cs *compiledSchema, id st
 func (ds *DataStore) routerSearch(ctx context.Context, cs *compiledSchema, q *Query, destSlice any) error {
 	if ds.l3 == nil {
 		return ErrL3Unavailable
+	}
+	if q == nil {
+		empty := Q().Build()
+		q = &empty
 	}
 	cols := colNames(cs)
 	sql, args := q.ToSQL(cs.tableName, cols, 100)
@@ -223,7 +235,7 @@ func (ds *DataStore) setL2(ctx context.Context, cs *compiledSchema, id string, v
 	if ttl == 0 {
 		ttl = ds.cfg.DefaultL2TTL
 	}
-	return ds.l2.Set(ctx, cs.Name, "", id, value, ttl)
+	return ds.l2.SetP(ctx, cs.l2Prefix, id, value, ttl)
 }
 
 func (ds *DataStore) readFromL3(ctx context.Context, cs *compiledSchema, id string, dest any) error {

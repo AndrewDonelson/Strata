@@ -49,7 +49,8 @@ func TestL2_Get_Miss(t *testing.T) {
 	s, _ := newTestStore(t)
 
 	var got testVal
-	require.NoError(t, s.Get(ctx, "schema", "", "missing", &got))
+	err := s.Get(ctx, "schema", "", "missing", &got)
+	require.ErrorIs(t, err, l2.ErrMiss)
 	assert.Empty(t, got.ID)
 }
 
@@ -99,8 +100,9 @@ func TestL2_TTL_Expiry(t *testing.T) {
 	mr.FastForward(200 * time.Millisecond)
 
 	var got testVal
-	require.NoError(t, s.Get(ctx, "schema", "", "4", &got))
-	assert.Empty(t, got.ID) // expired — zero value
+	err := s.Get(ctx, "schema", "", "4", &got)
+	require.ErrorIs(t, err, l2.ErrMiss) // expired — key gone
+	assert.Empty(t, got.ID)
 }
 
 func TestL2_SetMany_GetMany(t *testing.T) {
@@ -171,8 +173,8 @@ func TestL2_Stats_HitsAndMisses(t *testing.T) {
 	require.NoError(t, s.Set(ctx, "schema", "", "stat1", &testVal{ID: "s"}, time.Minute))
 
 	var got testVal
-	require.NoError(t, s.Get(ctx, "schema", "", "stat1", &got))      // hit
-	require.NoError(t, s.Get(ctx, "schema", "", "missing999", &got)) // miss
+	require.NoError(t, s.Get(ctx, "schema", "", "stat1", &got))                  // hit
+	require.ErrorIs(t, s.Get(ctx, "schema", "", "missing999", &got), l2.ErrMiss) // miss
 
 	st := s.Stats()
 	assert.Equal(t, int64(1), st.Hits)
@@ -275,5 +277,37 @@ func BenchmarkL2_Get(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		var got testVal
 		_ = s.Get(ctx, "bench", "", "b1", &got)
+	}
+}
+
+func BenchmarkL2_SetP(b *testing.B) {
+	mr, _ := miniredis.Run()
+	defer mr.Close()
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	s := l2.New(l2.Options{Client: client, Codec: codec.JSON{}})
+	ctx := context.Background()
+	val := &testVal{ID: "b1", Value: "bench", Score: 1}
+	prefix := "bench:bench:" // pre-computed as in compiledSchema.l2Prefix
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = s.SetP(ctx, prefix, "b1", val, time.Minute)
+	}
+}
+
+func BenchmarkL2_GetP(b *testing.B) {
+	mr, _ := miniredis.Run()
+	defer mr.Close()
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	s := l2.New(l2.Options{Client: client, Codec: codec.JSON{}})
+	ctx := context.Background()
+	val := &testVal{ID: "b1", Value: "bench", Score: 1}
+	prefix := "bench:bench:"
+	_ = s.SetP(ctx, prefix, "b1", val, time.Minute)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var got testVal
+		_ = s.GetP(ctx, prefix, "b1", &got)
 	}
 }

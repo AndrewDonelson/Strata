@@ -422,7 +422,7 @@ func (ds *DataStore) Exists(ctx context.Context, schemaName, id string) (bool, e
 		}
 	}
 	if ds.l2 != nil {
-		ok, err := ds.l2.Exists(ctx, cs.Name, "", id)
+		ok, err := ds.l2.ExistsP(ctx, cs.l2Prefix, id)
 		if err == nil && ok {
 			return true, nil
 		}

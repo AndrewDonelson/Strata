@@ -11,6 +11,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// ErrMiss is returned by Get and GetP when the key does not exist in Redis.
+// Callers use errors.Is(err, l2.ErrMiss) to distinguish a cache miss from a
+// genuine Redis error.
+var ErrMiss = errors.New("l2: miss")
+
 // Store is the L2 Redis cache adapter.
 type Store struct {
 	client    redis.UniversalClient
@@ -63,14 +68,14 @@ func (s *Store) Set(ctx context.Context, schema, keyPrefix, id string, value any
 }
 
 // Get retrieves and deserializes a value from Redis into dest.
-// Returns (without error) when key is missing; caller detects miss by checking dest.
+// Returns ErrMiss when key is missing; caller must check errors.Is(err, l2.ErrMiss).
 func (s *Store) Get(ctx context.Context, schema, keyPrefix, id string, dest any) error {
 	k := s.key(schema, keyPrefix, id)
 	b, err := s.client.Get(ctx, k).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			s.misses++
-			return nil
+			return ErrMiss
 		}
 		return fmt.Errorf("l2 get %s: %w", k, err)
 	}
@@ -94,6 +99,71 @@ func (s *Store) Exists(ctx context.Context, schema, keyPrefix, id string) (bool,
 // Delete removes a key from Redis.
 func (s *Store) Delete(ctx context.Context, schema, keyPrefix, id string) error {
 	k := s.key(schema, keyPrefix, id)
+	if err := s.client.Del(ctx, k).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("l2 delete %s: %w", k, err)
+	}
+	return nil
+}
+
+// ── Pre-computed-prefix hot-path methods ─────────────────────────────────────
+// These variants accept a pre-built base prefix (e.g. compiledSchema.l2Prefix)
+// so the caller never recalculates it on every call.  The compiled prefix is
+// stored once at schema-registration time in the form
+//   schemaName + ":" + schemaName + ":"
+// which matches the output of key(schema, "", id) when no global keyPrefix is set.
+
+// keyP builds a Redis key from a pre-computed base prefix and an id.
+func (s *Store) keyP(base, id string) string {
+	if s.keyPrefix != "" {
+		return s.keyPrefix + ":" + base + id
+	}
+	return base + id
+}
+
+// SetP stores a value using a pre-computed key prefix.
+func (s *Store) SetP(ctx context.Context, l2Prefix, id string, value any, ttl time.Duration) error {
+	b, err := s.codec.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("l2 marshal: %w", err)
+	}
+	k := s.keyP(l2Prefix, id)
+	if err := s.client.Set(ctx, k, b, ttl).Err(); err != nil {
+		return fmt.Errorf("l2 set %s: %w", k, err)
+	}
+	return nil
+}
+
+// GetP retrieves and deserializes a value using a pre-computed key prefix.
+func (s *Store) GetP(ctx context.Context, l2Prefix, id string, dest any) error {
+	k := s.keyP(l2Prefix, id)
+	b, err := s.client.Get(ctx, k).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			s.misses++
+			return ErrMiss
+		}
+		return fmt.Errorf("l2 get %s: %w", k, err)
+	}
+	s.hits++
+	if err := s.codec.Unmarshal(b, dest); err != nil {
+		return fmt.Errorf("l2 unmarshal: %w", err)
+	}
+	return nil
+}
+
+// ExistsP checks key existence using a pre-computed key prefix.
+func (s *Store) ExistsP(ctx context.Context, l2Prefix, id string) (bool, error) {
+	k := s.keyP(l2Prefix, id)
+	n, err := s.client.Exists(ctx, k).Result()
+	if err != nil {
+		return false, fmt.Errorf("l2 exists %s: %w", k, err)
+	}
+	return n > 0, nil
+}
+
+// DeleteP removes a key using a pre-computed key prefix.
+func (s *Store) DeleteP(ctx context.Context, l2Prefix, id string) error {
+	k := s.keyP(l2Prefix, id)
 	if err := s.client.Del(ctx, k).Err(); err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("l2 delete %s: %w", k, err)
 	}

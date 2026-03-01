@@ -86,6 +86,7 @@ type compiledSchema struct {
 	tableName string
 	modelType reflect.Type
 	l1Prefix  string // pre-computed cs.Name+":", avoids fmt.Sprintf on every Get
+	l2Prefix  string // pre-computed cs.Name+":"+cs.Name+":", skips key() on the hot path
 }
 
 // schemaRegistry holds all registered schemas.
@@ -148,6 +149,7 @@ func (r *schemaRegistry) register(s Schema) (*compiledSchema, error) {
 		tableName: tableName,
 		modelType: structType,
 		l1Prefix:  s.Name + ":",
+		l2Prefix:  s.Name + ":" + s.Name + ":",
 	}
 	r.schemas[s.Name] = cs
 	return cs, nil
