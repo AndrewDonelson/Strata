@@ -2,23 +2,23 @@ goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkDataStore_Set_L1-24           	26059222	       133.1 ns/op	      16 B/op	       1 allocs/op
-BenchmarkDataStore_Get_L1_Hit-24       	12738747	       294.2 ns/op	      64 B/op	       2 allocs/op
-BenchmarkDataStore_Get_L1_Miss-24      	23779702	       135.4 ns/op	      72 B/op	       2 allocs/op
-BenchmarkDataStore_Delete_L1-24        	12216566	       280.3 ns/op	     192 B/op	       4 allocs/op
-BenchmarkDataStore_GetTyped_L1-24      	20518927	       179.2 ns/op	      64 B/op	       2 allocs/op
-BenchmarkDataStore_SetMany_L1-24       	12302962	       285.3 ns/op	      48 B/op	       3 allocs/op
-BenchmarkDataStore_Exists-24           	49273134	        72.70 ns/op	       0 B/op	       0 allocs/op
-BenchmarkDataStore_Stats-24            	 1891027	      1921 ns/op	       0 B/op	       0 allocs/op
-BenchmarkQueryBuilder_Simple-24        	257923382	        13.85 ns/op	      16 B/op	       1 allocs/op
-BenchmarkQueryBuilder_Complex-24       	89176230	        34.85 ns/op	      80 B/op	       2 allocs/op
-BenchmarkQuery_ToSQL-24                	11089491	       339.7 ns/op	     432 B/op	       9 allocs/op
-BenchmarkAES256GCM_Encrypt-24          	12459876	       290.0 ns/op	     864 B/op	       3 allocs/op
-BenchmarkAES256GCM_Decrypt-24          	16303680	       227.3 ns/op	     816 B/op	       2 allocs/op
-BenchmarkDataStore_Set_Encrypted-24    	27326504	       131.3 ns/op	      16 B/op	       1 allocs/op
-BenchmarkDataStore_SetGet_L1-24        	11724315	       290.7 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Set_L1-24           	27676581	       128.0 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_Get_L1_Hit-24       	11995884	       292.5 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_Get_L1_Miss-24      	27012748	       132.3 ns/op	      72 B/op	       2 allocs/op
+BenchmarkDataStore_Delete_L1-24        	12288331	       271.6 ns/op	     192 B/op	       4 allocs/op
+BenchmarkDataStore_GetTyped_L1-24      	21183046	       170.5 ns/op	      64 B/op	       2 allocs/op
+BenchmarkDataStore_SetMany_L1-24       	12896281	       277.5 ns/op	      48 B/op	       3 allocs/op
+BenchmarkDataStore_Exists-24           	46693224	        70.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDataStore_Stats-24            	 1935805	      1868 ns/op	       0 B/op	       0 allocs/op
+BenchmarkQueryBuilder_Simple-24        	270786134	        13.50 ns/op	      16 B/op	       1 allocs/op
+BenchmarkQueryBuilder_Complex-24       	94341579	        34.60 ns/op	      80 B/op	       2 allocs/op
+BenchmarkQuery_ToSQL-24                	10686199	       329.8 ns/op	     432 B/op	       9 allocs/op
+BenchmarkAES256GCM_Encrypt-24          	13035786	       285.1 ns/op	     864 B/op	       3 allocs/op
+BenchmarkAES256GCM_Decrypt-24          	14532370	       224.2 ns/op	     816 B/op	       2 allocs/op
+BenchmarkDataStore_Set_Encrypted-24    	27621561	       130.2 ns/op	      16 B/op	       1 allocs/op
+BenchmarkDataStore_SetGet_L1-24        	12733686	       279.1 ns/op	      64 B/op	       2 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata	59.182s
+ok  	github.com/AndrewDonelson/strata	58.657s
 PASS
 ok  	github.com/AndrewDonelson/strata/internal/clock	0.003s
 PASS
@@ -27,23 +27,23 @@ goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata/internal/l1
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkL1_Set-24             	122663888	        28.90 ns/op	       8 B/op	       0 allocs/op
-BenchmarkL1_Get_Hit-24         	133101199	        27.09 ns/op	       0 B/op	       0 allocs/op
-BenchmarkL1_Get_Parallel-24    	35172172	        99.55 ns/op	       0 B/op	       0 allocs/op
-BenchmarkL1_GetWithMeta-24     	67065706	        52.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Set-24             	125065136	        28.40 ns/op	       8 B/op	       0 allocs/op
+BenchmarkL1_Get_Hit-24         	135295692	        26.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_Get_Parallel-24    	34174358	        96.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkL1_GetWithMeta-24     	67046508	        52.29 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l1	20.066s
+ok  	github.com/AndrewDonelson/strata/internal/l1	19.674s
 goos: linux
 goarch: amd64
 pkg: github.com/AndrewDonelson/strata/internal/l2
 cpu: 12th Gen Intel(R) Core(TM) i9-12900K
-BenchmarkL2_Set-24     	  210238	     14728 ns/op	     921 B/op	      36 allocs/op
-BenchmarkL2_Get-24     	  258985	     13954 ns/op	     720 B/op	      28 allocs/op
-BenchmarkL2_SetP-24    	  213313	     14157 ns/op	     921 B/op	      36 allocs/op
-BenchmarkL2_GetP-24    	  256023	     14513 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_Set-24     	  223159	     13695 ns/op	     921 B/op	      36 allocs/op
+BenchmarkL2_Get-24     	  254371	     13824 ns/op	     720 B/op	      28 allocs/op
+BenchmarkL2_SetP-24    	  238351	     13518 ns/op	     921 B/op	      36 allocs/op
+BenchmarkL2_GetP-24    	  270873	     14178 ns/op	     720 B/op	      28 allocs/op
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l2	14.089s
+ok  	github.com/AndrewDonelson/strata/internal/l2	14.245s
 PASS
-ok  	github.com/AndrewDonelson/strata/internal/l3	0.028s
+ok  	github.com/AndrewDonelson/strata/internal/l3	0.030s
 PASS
 ok  	github.com/AndrewDonelson/strata/internal/metrics	0.002s
