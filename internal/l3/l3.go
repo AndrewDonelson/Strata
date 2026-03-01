@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// l3.go — PostgreSQL persistence tier: upsert, parameterised query, bulk
+// COPY, transaction management, Exists/Count helpers, and optional read-
+// replica routing via a secondary pgxpool.
+
 // Package l3 provides the PostgreSQL persistence tier adapter.
 package l3
 

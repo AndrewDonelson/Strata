@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// reflect.go — struct introspection helpers for the L3 tier: Go type →
+// PostgreSQL SQL type mapping, ColumnDef derivation from struct tags, embedded
+// struct flattening, snake_case conversion, and GetFieldValue/SetFieldValue.
+
 package l3
 
 import (

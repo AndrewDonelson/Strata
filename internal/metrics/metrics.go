@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// metrics.go — MetricsRecorder interface for pluggable observability (hits,
+// misses, latency, errors, dirty count) and a noop implementation used when
+// no metrics backend is configured.
+
 // Package metrics provides the MetricsRecorder interface and a noop implementation.
 package metrics
 

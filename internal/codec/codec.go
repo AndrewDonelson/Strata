@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// codec.go — Codec interface for value serialisation and deserialisation;
+// implementations (JSON, MessagePack) are selected per-store at construction
+// time.
+
 // Package codec provides encode/decode interfaces for cache serialization.
 package codec
 

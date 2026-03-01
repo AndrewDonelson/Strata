@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// crypto.go — AES-256-GCM field-level encryption and decryption helpers
+// used by Strata to protect sensitive struct fields before they are written
+// to L2 (Redis) or L3 (PostgreSQL).
+
 package strata
 
 import (

@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// schema.go — Schema registration API, compiledSchema internals, per-schema
+// cache policies (L1/L2/L3), write modes, index definitions, lifecycle hooks,
+// and the struct-to-column reflection pipeline.
+
 package strata
 
 import (

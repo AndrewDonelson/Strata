@@ -1,3 +1,11 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// l2.go — Redis-backed L2 cache tier: standard CRUD operations, pre-computed
+// key-prefix hot-path variants (SetP/GetP/ExistsP/DeleteP), pipeline batch
+// ops, pub/sub invalidation support, and the ErrMiss sentinel that drives
+// clean tier fallthrough in the router.
+
 // Package l2 provides the Redis tier cache adapter.
 package l2
 

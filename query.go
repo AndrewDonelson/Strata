@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// query.go — fluent Query builder for constructing parameterised SELECT
+// statements with WHERE, ORDER BY, LIMIT, and OFFSET clauses, consumed by
+// Search, SearchTyped, SearchCached, and WarmCache.
+
 package strata
 
 import (

@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// strata.go — public DataStore API: NewDataStore, Get, Set, Delete, Search,
+// SearchTyped, SearchCached, Count, Exists, WarmCache, InvalidateAll, Tx,
+// Stats, Close, and all top-level configuration and policy types.
+
 package strata
 
 import (

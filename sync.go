@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// sync.go — write-behind dirty queue, Redis pub/sub invalidation broadcaster
+// for multi-node cache coherence, and the bounded L1-async worker pool that
+// backs the L1Async write mode.
+
 package strata
 
 import (

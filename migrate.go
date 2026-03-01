@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// migrate.go — database schema migration engine: idempotent CREATE TABLE and
+// ALTER TABLE for registered schemas, file-based SQL migration support via
+// MigrateFrom, and MigrationStatus for audit queries.
+
 package strata
 
 import (

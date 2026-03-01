@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// errors.go — sentinel error variables returned by the public Strata API,
+// covering schema registration, cache misses, L3 unavailability, and
+// transaction failures.
+
 // Package strata provides a three-tier auto-caching data library unifying
 // in-memory (L1), Redis (L2), and PostgreSQL (L3) behind a single API.
 package strata

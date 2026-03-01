@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// json.go — JSON codec implementation wrapping encoding/json; primarily used
+// in tests and when human-readable Redis values are preferred.
+
 package codec
 
 import "encoding/json"

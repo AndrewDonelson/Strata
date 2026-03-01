@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// msgpack.go — MessagePack codec implementation using vmihailenco/msgpack;
+// the default codec for L2 Redis storage due to its compact binary format.
+
 package codec
 
 import "github.com/vmihailenco/msgpack/v5"

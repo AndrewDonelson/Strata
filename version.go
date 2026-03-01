@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// version.go — build-time version, date, and environment metadata injected
+// via -ldflags by the Makefile and exposed through the Version() function.
+
 package strata
 
 // Build-time variables injected via -ldflags by the Makefile.

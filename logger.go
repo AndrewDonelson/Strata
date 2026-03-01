@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// logger.go — Logger interface and noop implementation used internally by
+// Strata for structured logging; swap in zap, slog, or logrus by passing
+// a custom implementation to Config.Logger.
+
 package strata
 
 // Logger is the logging interface used internally by Strata.

@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// router.go — tri-tier routing logic that moves data between L1 (in-memory),
+// L2 (Redis), and L3 (PostgreSQL). Implements write-through, write-behind,
+// and L1-async write modes, cache population on read, and cascade delete.
+
 package strata
 
 import (

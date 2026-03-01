@@ -1,3 +1,10 @@
+// Copyright (c) 2026 Nlaak Studios (https://nlaak.com)
+// Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
+//
+// l1.go — sharded concurrent in-memory cache with per-entry TTL, background
+// eviction, and optional per-entry metadata; forms the hot tier of the
+// Strata three-tier caching stack.
+
 // Package l1 provides a sharded, concurrent in-memory cache with TTL and eviction.
 package l1
 
