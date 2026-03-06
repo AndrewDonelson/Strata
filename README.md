@@ -717,13 +717,11 @@ Strata uses `pgxpool` for connection pooling. `SetMany` uses the PostgreSQL COPY
 
 ### L4 — Distributed Gossip Ledger
 
-L4 is a standalone, leaderless peer-to-peer sync layer. Each node maintains its own copy of all records it receives; there is no central store and no leader election.
+L4 is integrated into the Strata write path, not a standalone module. When `Config.L4.Enabled = true` and a schema opts in via `L4.Enabled: true`, every confirmed L3 write automatically triggers an L4 publish — the calling code never needs to know.
 
-Records form a per-AppID hash chain: each record's `Hash` is computed over `prevHash|appID|uuid|payload|timestamp` using SHA-256. Every record is signed by its publisher using Ed25519 (`NodeSig`). Quorum confirmation advances a record from `pending` to `confirmed`; a revocation tombstone is gossiped immediately to all connected peers.
+Each node maintains its own local copy of all records it receives; there is no leader and no central store. Records form a per-AppID hash chain: each record's `Hash` is computed over `prevHash|appID|uuid|payload|timestamp` using SHA-256 and signed with Ed25519 (`NodeSig`). Quorum confirmation advances a record from `pending` to `confirmed`; a revocation tombstone is gossiped immediately to all connected peers.
 
-In **peer mode**, records reside in an in-memory store and are lost on restart. This is suited for ephemeral coordination, audit trails, or single-run integration tests.
-
-In **ledger mode**, records are persisted to a per-node BoltDB file (`DataDir/l4.db`). The block height (`store.Height()`) represents the total number of records stored locally. The optional `APIServer` exposes query access over HTTP.
+In **peer mode**, records reside in an in-memory store and are lost on restart. In **ledger mode**, records are persisted to a per-node BoltDB file (`DataDir/l4.db`). The optional `APIServer` exposes query access over HTTP.
 
 ### Cross-Instance Invalidation
 
