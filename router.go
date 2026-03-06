@@ -110,6 +110,8 @@ func (ds *DataStore) routerSetWriteThrough(ctx context.Context, cs *compiledSche
 			return err
 		}
 	}
+	// L4 — sync after confirmed L3 write
+	ds.syncToL4(ctx, cs, id, value)
 	// L2
 	if ds.l2 != nil {
 		_ = ds.setL2(ctx, cs, id, value)
@@ -148,6 +150,8 @@ func (ds *DataStore) routerSetL1Async(ctx context.Context, cs *compiledSchema, i
 			return err
 		}
 	}
+	// L4 — sync after confirmed L3 write
+	ds.syncToL4(ctx, cs, id, value)
 	if ds.l2 != nil {
 		_ = ds.setL2(ctx, cs, id, value)
 	}
@@ -178,6 +182,8 @@ func (ds *DataStore) routerDelete(ctx context.Context, cs *compiledSchema, id st
 			return err
 		}
 	}
+	// L4 — revoke the record if SyncDeletes is enabled for this schema
+	ds.revokeFromL4(ctx, cs, id)
 	if ds.sync != nil {
 		ds.sync.publishInvalidation(ctx, cs.Name, id, "delete")
 	}

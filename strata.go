@@ -9,6 +9,7 @@ package strata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/AndrewDonelson/strata/internal/l1"
 	"github.com/AndrewDonelson/strata/internal/l2"
 	"github.com/AndrewDonelson/strata/internal/l3"
+	l4pkg "github.com/AndrewDonelson/strata/internal/l4"
 	"github.com/AndrewDonelson/strata/internal/metrics"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +57,22 @@ type L3PoolConfig struct {
 	MaxConnIdleTime time.Duration
 }
 
+// L4Config configures the optional L4 distributed peer-to-peer sync layer.
+// Set Enabled = true to activate; choose Mode and set Port/DataDir/Quorum as
+// needed.  Individual schemas opt-in via Schema.L4.Enabled.
+type L4Config struct {
+	Enabled        bool          // false = L4 is entirely inactive (default)
+	Mode           string        // "peer" (in-memory) or "ledger" (BoltDB-backed)
+	Port           int           // TCP listen port; default 7743
+	DataDir        string        // BoltDB directory for ledger mode; default "/var/lib/strata/l4"
+	SyncInterval   time.Duration // gossip sync frequency; default 30s
+	MaxPeers       int           // max simultaneous peer connections; default 50
+	Quorum         int           // confirmations needed for pending → confirmed; default 3
+	BootstrapPeers []string      // "host:port" addresses to dial on startup
+	DNSSeed        string        // DNS seed hostname for peer discovery
+	NodeKeyPath    string        // path to load/persist the Ed25519 node private key
+}
+
 // Config contains all DataStore configuration.
 type Config struct {
 	// DSNs
@@ -80,6 +98,9 @@ type Config struct {
 
 	// Invalidation
 	InvalidationChannel string
+
+	// L4 distributed peer sync (optional; schemas opt-in via Schema.L4.Enabled)
+	L4 L4Config
 
 	// Optional overrideable components
 	Codec   codec.Codec
@@ -181,6 +202,8 @@ type DataStore struct {
 	l1        *l1.Store
 	l2        *l2.Store
 	l3        l3Backend
+	l4layer   l4pkg.L4Layer // nil when L4 is disabled
+	l4nodeID  string        // cached node identity (Ed25519 pub-key hex)
 	sync      *syncEngine
 	stats     storeStats
 	metrics   metrics.MetricsRecorder
@@ -252,11 +275,96 @@ func NewDataStore(cfg Config) (*DataStore, error) {
 		ds.l3 = l3.New(pool, nil)
 	}
 
+	// L4 distributed sync layer (optional)
+	if cfg.L4.Enabled {
+		l4cfg := l4pkg.Config{
+			Enabled:        true,
+			Mode:           cfg.L4.Mode,
+			Port:           cfg.L4.Port,
+			DataDir:        cfg.L4.DataDir,
+			SyncInterval:   cfg.L4.SyncInterval,
+			MaxPeers:       cfg.L4.MaxPeers,
+			Quorum:         cfg.L4.Quorum,
+			BootstrapPeers: cfg.L4.BootstrapPeers,
+			DNSSeed:        cfg.L4.DNSSeed,
+			NodeKeyPath:    cfg.L4.NodeKeyPath,
+		}
+		if err := l4cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("strata: l4 config: %w", err)
+		}
+		layer, err := l4pkg.New(l4cfg)
+		if err != nil {
+			return nil, fmt.Errorf("strata: l4 init: %w", err)
+		}
+		ds.l4layer = layer
+		ds.l4nodeID = layer.Status().NodeID
+	}
+
 	// Sync engine
 	ds.sync = newSyncEngine(ds)
 	ds.sync.start()
 
 	return ds, nil
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// L4 helpers — called by the router after successful L3 operations
+// ────────────────────────────────────────────────────────────────────────────
+
+// syncToL4 publishes value to the L4 layer for schemas that have L4.Enabled.
+// Called by the router immediately after a successful L3 write.
+// Errors are logged but never returned — L4 is best-effort.
+func (ds *DataStore) syncToL4(_ context.Context, cs *compiledSchema, id string, value any) {
+	if ds.l4layer == nil || !cs.L4.Enabled {
+		return
+	}
+	payload, err := structToL4Payload(value)
+	if err != nil || payload == nil {
+		if ds.logger != nil {
+			ds.logger.Warn("strata: l4 payload marshal failed", "schema", cs.Name, "id", id, "err", err)
+		}
+		return
+	}
+	appID := cs.L4.AppID
+	if appID == "" {
+		appID = cs.Name
+	}
+	if _, err := ds.l4layer.Publish(appID, ds.l4nodeID, payload); err != nil {
+		if ds.logger != nil {
+			ds.logger.Warn("strata: l4 publish failed", "schema", cs.Name, "id", id, "err", err)
+		}
+	}
+}
+
+// revokeFromL4 revokes the L4 record on a schema Delete if SyncDeletes is enabled.
+// Errors are logged but never returned.
+func (ds *DataStore) revokeFromL4(_ context.Context, cs *compiledSchema, id string) {
+	if ds.l4layer == nil || !cs.L4.Enabled || !cs.L4.SyncDeletes {
+		return
+	}
+	appID := cs.L4.AppID
+	if appID == "" {
+		appID = cs.Name
+	}
+	if err := ds.l4layer.Revoke(appID, id); err != nil {
+		if ds.logger != nil {
+			ds.logger.Warn("strata: l4 revoke failed", "schema", cs.Name, "id", id, "err", err)
+		}
+	}
+}
+
+// structToL4Payload converts an arbitrary struct/value to map[string]interface{}
+// via JSON round-trip so it can be stored as an L4 record payload.
+func structToL4Payload(value any) (map[string]interface{}, error) {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -691,6 +799,9 @@ func (ds *DataStore) Close() error {
 	}
 	if ds.l3 != nil {
 		ds.l3.Close()
+	}
+	if ds.l4layer != nil {
+		_ = ds.l4layer.Shutdown()
 	}
 	return nil
 }

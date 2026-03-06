@@ -2,7 +2,7 @@
 // Author: Andrew Donelson (https://www.linkedin.com/in/andrew-donelson/)
 //
 // schema.go — Schema registration API, compiledSchema internals, per-schema
-// cache policies (L1/L2/L3), write modes, index definitions, lifecycle hooks,
+// cache policies (L1/L2/L3/L4), write modes, index definitions, lifecycle hooks,
 // and the struct-to-column reflection pipeline.
 
 package strata
@@ -55,6 +55,15 @@ type PostgresPolicy struct {
 	PartitionBy string
 }
 
+// L4Policy configures optional L4 distributed-ledger sync for a schema.
+// When Enabled is true, every successful L3 write is automatically published
+// to the L4 peer layer.  Deletes are revoked if SyncDeletes is also true.
+type L4Policy struct {
+	Enabled     bool   // false = no L4 sync for this schema (default)
+	AppID       string // L4 namespace; defaults to schema Name
+	SyncDeletes bool   // if true, Delete() → L4 Revoke(); false = L4 record is left as-is
+}
+
 // Index defines a database index on one or more columns.
 type Index struct {
 	Fields []string
@@ -79,6 +88,7 @@ type Schema struct {
 	L1        MemPolicy
 	L2        RedisPolicy
 	L3        PostgresPolicy
+	L4        L4Policy
 	WriteMode WriteMode
 	Indexes   []Index
 	Hooks     SchemaHooks
