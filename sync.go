@@ -278,6 +278,9 @@ func (se *syncEngine) flushDirty(ctx context.Context) error {
 			entry.retries++
 			entry.lastErr = err
 			failed = append(failed, entry)
+		} else {
+			// L4 — sync after confirmed L3 flush (write-behind path)
+			se.ds.syncToL4(ctx, cs, entry.id, entry.value)
 		}
 	}
 	if len(failed) > 0 {

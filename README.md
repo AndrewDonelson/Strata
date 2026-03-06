@@ -4,7 +4,7 @@
 
 # Strata
 
-**Three-tier auto-caching data library for Go — L1 (memory) → L2 (Redis) → L3 (PostgreSQL) behind a single API.**
+**Four-tier data library for Go — L1 (memory) → L2 (Redis) → L3 (PostgreSQL) → L4 (distributed ledger/gossip) behind a single API.**
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/AndrewDonelson/strata.svg)](https://pkg.go.dev/github.com/AndrewDonelson/strata)
 [![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)](https://go.dev/dl/)
@@ -14,6 +14,8 @@
 
 Strata removes the boilerplate of cache management from Go services. You define a schema once and call `Get`, `Set`, `Delete`, or `Search`. Strata automatically routes reads through L1 → L2 → L3, propagates writes, evicts stale entries, and keeps a cluster of server instances consistent via Redis pub/sub invalidation.
 
+The optional **L4 distributed sync layer** adds a peer-to-peer gossip network with cryptographically signed, hash-chained records — providing an immutable audit trail, cross-node publishing, quorum-confirmed records, and revocation support, with no centralised coordinator required.
+
 ```
 Get(ctx, "players", id, &dest)
   │
@@ -21,6 +23,9 @@ Get(ctx, "players", id, &dest)
   ├─► L2 hit?  → populate L1 → return (~500 μs)
   └─► L3 hit?  → populate L2+L1 → return (~5 ms)
                └─► not found → ErrNotFound
+
+L4 (optional, independent of the read path above):
+  Publish(appID, nodeID, payload) → gossip to peers → quorum confirm → immutable record
 ```
 
 ## Table of Contents
@@ -53,7 +58,18 @@ Get(ctx, "players", id, &dest)
 12. [Configuration Reference](#configuration-reference)
 13. [Error Reference](#error-reference)
 14. [Architecture Notes](#architecture-notes)
-15. [Contributing](#contributing)
+15. [L4 — Distributed Sync Layer](#l4--distributed-sync-layer)
+    - [Concepts](#concepts)
+    - [Quick Start — Peer Mode](#quick-start--peer-mode)
+    - [Quick Start — Ledger Mode](#quick-start--ledger-mode)
+    - [L4 API Reference](#l4-api-reference)
+    - [HTTP API Server](#http-api-server)
+    - [L4 Configuration](#l4-configuration)
+    - [L4 Errors](#l4-errors)
+    - [L4 Transport Options](#l4-transport-options)
+    - [L4 Store Options](#l4-store-options)
+    - [L4 Testing Patterns](#l4-testing-patterns)
+16. [Contributing](#contributing)
 
 ---
 
@@ -699,6 +715,14 @@ Strata accepts any `redis.UniversalClient` (standalone, Sentinel, or Cluster). K
 
 Strata uses `pgxpool` for connection pooling. `SetMany` uses the PostgreSQL COPY protocol for bulk inserts. Upsert is `INSERT … ON CONFLICT DO UPDATE`. Read replica connections (PostgresPolicy.ReadReplica) are used for `Search` and `Count` queries.
 
+### L4 — Distributed Gossip Ledger
+
+L4 is integrated into the Strata write path, not a standalone module. When `Config.L4.Enabled = true` and a schema opts in via `L4.Enabled: true`, every confirmed L3 write automatically triggers an L4 publish — the calling code never needs to know.
+
+Each node maintains its own local copy of all records it receives; there is no leader and no central store. Records form a per-AppID hash chain: each record's `Hash` is computed over `prevHash|appID|uuid|payload|timestamp` using SHA-256 and signed with Ed25519 (`NodeSig`). Quorum confirmation advances a record from `pending` to `confirmed`; a revocation tombstone is gossiped immediately to all connected peers.
+
+In **peer mode**, records reside in an in-memory store and are lost on restart. In **ledger mode**, records are persisted to a per-node BoltDB file (`DataDir/l4.db`). The optional `APIServer` exposes query access over HTTP.
+
 ### Cross-Instance Invalidation
 
 Every write publishes a JSON message to the `strata:invalidate` Redis channel:
@@ -708,6 +732,270 @@ Every write publishes a JSON message to the `strata:invalidate` Redis channel:
 ```
 
 Every running instance (including the writer) subscribes to this channel and removes the affected L1 entry on receipt. This keeps the L1 caches of all servers in a cluster consistent within ~50 ms of any write.
+
+---
+
+## L4 — Distributed Sync Layer
+
+L4 is an **optional, integrated** peer-to-peer sync layer built into the Strata write path. When enabled at both the `Config` level and the `Schema` level, every successful L3 (PostgreSQL) write is automatically published to a distributed, Ed25519-signed, hash-chained ledger — no extra code required.
+
+The write flow with L4 enabled:
+
+```
+Set(ctx, schema, id, value)
+  │
+  ├─► L3 write (PostgreSQL)  ← confirmed first
+  ├─► L4 Publish             ← automatic after L3 success
+  ├─► L2 write (Redis)
+  └─► L1 write (in-memory)
+```
+
+For `WriteBehind` schemas, L4 is synced **after** the dirty-queue flush confirms the L3 write — never before.  
+For `WriteThrough` and `WriteThroughL1Async`, L4 is synced synchronously in the same `Set` call.
+
+L4 is disabled by default. Schemas that don't set `L4.Enabled: true` are completely unaffected.
+
+### Quick Start
+
+#### 1. Enable L4 globally in Config
+
+```go
+ds, err := strata.NewDataStore(strata.Config{
+    PostgresDSN: "...",
+    RedisAddr:   "...",
+    L4: strata.L4Config{
+        Enabled:        true,
+        Mode:           "ledger",       // "peer" (in-memory) or "ledger" (BoltDB-backed)
+        Port:           7743,
+        DataDir:        "/var/lib/myapp/l4",
+        Quorum:         3,
+        BootstrapPeers: []string{"10.0.0.2:7743", "10.0.0.3:7743"},
+    },
+})
+```
+
+#### 2. Opt schemas into L4 sync
+
+```go
+err = ds.Register(strata.Schema{
+    Name:  "leaderboard",
+    Model: &LeaderboardEntry{},
+    L4: strata.L4Policy{
+        Enabled:     true,
+        AppID:       "bounty-hunters",  // L4 namespace; defaults to schema name
+        SyncDeletes: true,              // Delete() → L4 Revoke()
+    },
+})
+```
+
+#### 3. Just use Strata normally — L4 syncs automatically
+
+```go
+// This upserts to PostgreSQL AND publishes to the L4 distributed ledger.
+err = ds.Set(ctx, "leaderboard", entry.Callsign, &LeaderboardEntry{
+    Callsign: "vox",
+    XP:       14_500,
+    Rank:     3,
+    Bounty:   2_850,
+    Credits:  73_200,
+})
+
+// Delete → PostgreSQL delete + L4 revocation (because SyncDeletes: true)
+err = ds.Delete(ctx, "leaderboard", "vox")
+```
+
+### Example — Subspace Bounty Hunter Leaderboard
+
+A public ledger of player stats that any node in the network can query and verify:
+
+```go
+type LeaderboardEntry struct {
+    Callsign string `strata:"primary_key"`
+    XP       int64
+    Rank     int
+    Bounty   int64
+    Credits  int64
+    UpdatedAt time.Time `strata:"auto_now"`
+}
+
+// Config
+ds, _ := strata.NewDataStore(strata.Config{
+    PostgresDSN: os.Getenv("PG_DSN"),
+    RedisAddr:   "localhost:6379",
+    L4: strata.L4Config{
+        Enabled: true,
+        Mode:    "ledger",
+        Port:    7743,
+        Quorum:  2,
+    },
+})
+
+// Schema — opt into L4
+_ = ds.Register(strata.Schema{
+    Name:  "leaderboard",
+    Model: &LeaderboardEntry{},
+    L4:    strata.L4Policy{Enabled: true, AppID: "bounty-hunters"},
+})
+_ = ds.Migrate(ctx)
+
+// Update a player — L4 automatically gets a cryptographically signed, hash-chained record
+_ = ds.Set(ctx, "leaderboard", "vox", &LeaderboardEntry{
+    Callsign: "vox",
+    XP:       14_500,
+    Rank:     3,
+    Bounty:   2_850,
+    Credits:  73_200,
+})
+```
+
+Any network peer can now verify the full history of every leaderboard change — even offline nodes that rejoin later will sync the ledger automatically.
+
+### `L4Config` — global layer configuration
+
+```go
+type strata.L4Config struct {
+    Enabled        bool          // false = L4 is entirely inactive (default)
+    Mode           string        // "peer" (in-memory) or "ledger" (BoltDB-backed)
+    Port           int           // TCP listen port; default 7743
+    DataDir        string        // BoltDB data directory for ledger mode; default "/var/lib/strata/l4"
+    SyncInterval   time.Duration // gossip sync frequency; default 30s
+    MaxPeers       int           // max simultaneous peer connections; default 50
+    Quorum         int           // confirmations needed for pending → confirmed; default 3
+    BootstrapPeers []string      // "host:port" peer addresses to dial on startup
+    DNSSeed        string        // DNS seed hostname for peer discovery
+    NodeKeyPath    string        // path to load/persist the Ed25519 node private key (optional)
+}
+```
+
+### `L4Policy` — per-schema opt-in
+
+```go
+type strata.L4Policy struct {
+    Enabled     bool   // false = no L4 sync for this schema (default)
+    AppID       string // L4 namespace the records are published under; defaults to schema Name
+    SyncDeletes bool   // if true, Delete() issues an L4 Revoke; if false, L4 records persist
+}
+```
+
+Schemas with `L4.Enabled = false` (the default) are completely unaffected by the global `L4Config`.
+
+### Accessing L4 Records Directly
+
+You can query the L4 layer independently at any time — useful for building audit UIs, ledger explorers, or cross-node sync checks.
+
+> **Note:** Direct access requires importing `github.com/AndrewDonelson/strata/internal/l4`.
+
+```go
+import "github.com/AndrewDonelson/strata/internal/l4"
+
+// Get the running layer (the DataStore wires this internally)
+// For external queries, construct your own read-only layer pointed at the same DataDir:
+store, _ := l4.NewBoltStore("/var/lib/myapp/l4")
+defer store.Close()
+
+// Retrieve the last 50 records for the bounty-hunters app
+records, _ := store.Latest("bounty-hunters", 50)
+for _, r := range records {
+    fmt.Printf("%s  rank=%v  credits=%v  confirmed=%v\n",
+        r.UUID, r.Payload["rank"], r.Payload["credits"], r.Confirmed)
+}
+
+// Subscribe to live record events (via a full l4.Layer):
+layer.Subscribe("bounty-hunters", func(rec l4.L4Record) {
+    fmt.Printf("new record: %s  status=%s\n", rec.UUID, rec.Status)
+})
+```
+
+### Record Lifecycle
+
+```
+Set(ctx, schema, id, value)
+  └─► L3 write succeeds
+        └─► L4 Publish(appID, nodeID, payload)
+              └─► status = "pending"
+              └─► gossips to peers
+                    └─► Quorum confirmations → status = "confirmed"
+
+Delete(ctx, schema, id)  [when SyncDeletes = true]
+  └─► L3 delete succeeds
+        └─► L4 Revoke(appID, id)
+              └─► status = "revoked"
+              └─► gossips to peers
+```
+
+Record status constants:
+
+```go
+l4.StatusPending   = "pending"   // published, awaiting quorum
+l4.StatusConfirmed = "confirmed" // quorum reached
+l4.StatusRevoked   = "revoked"   // record revoked (schema Delete with SyncDeletes)
+```
+
+### HTTP API Server (ledger mode)
+
+An optional HTTP server can be started alongside the ledger to serve external queries. Build it with the running `l4.Layer`:
+
+```go
+import "github.com/AndrewDonelson/strata/internal/l4"
+
+store, _   := l4.NewBoltStore("/var/lib/myapp/l4")
+transport  := l4.NewTCPTransport(nodeID, 50, nil)
+api        := l4.NewAPIServer(layer, store, transport)
+go api.Listen(":7744")
+// Graceful shutdown:
+_ = api.Shutdown(context.Background())
+```
+
+| Method | Path | Returns |
+|--------|------|---------|
+| `GET` | `/query/{uuid}?app_id=<appID>` | `L4Record` JSON (200) or 404 |
+| `GET` | `/peers` | `[]L4Peer` JSON |
+| `POST` | `/sync` | `{"height": N}` |
+
+Rate limited to 100 req/min per IP. `Access-Control-Allow-Origin: *` on all responses.
+
+### L4 Errors
+
+```go
+l4.ErrL4Disabled        // Config.L4.Enabled = false; all l4 ops return this
+l4.ErrInvalidL4Mode     // Mode must be "peer" or "ledger"
+l4.ErrInvalidQuorum     // Quorum < 1
+l4.ErrAlreadyPublished  // record already exists for this UUID+AppID
+l4.ErrAlreadyRevoked    // record is already revoked
+l4.ErrNotFound          // no record found
+l4.ErrInvalidSignature  // Ed25519 signature check failed
+l4.ErrChainBreak        // hash chain integrity violated
+l4.ErrNoPeers           // no connected peers
+l4.ErrQuorumNotMet      // record is still pending (not enough confirmations)
+l4.ErrStoreUnavailable  // store unavailable in peer mode
+```
+
+L4 sync errors inside `Set`/`Delete` are **logged and swallowed** — they never cause the Strata operation to fail. The source of truth is always L3.
+
+### Testing with L4
+
+```go
+// Unit tests — disable L4 globally (zero overhead)
+ds, _ := strata.NewDataStore(strata.Config{
+    PostgresDSN: "...",
+    // L4 not set → Enabled defaults to false
+})
+
+// Integration tests — peer mode with in-memory transport (no ports)
+ds, _ := strata.NewDataStore(strata.Config{
+    PostgresDSN: testDSN,
+    L4: strata.L4Config{
+        Enabled: true,
+        Mode:    "peer",
+        Quorum:  1,
+    },
+})
+_ = ds.Register(strata.Schema{
+    Name:  "leaderboard",
+    Model: &LeaderboardEntry{},
+    L4:    strata.L4Policy{Enabled: true},
+})
+```
 
 ---
 
