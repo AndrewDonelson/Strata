@@ -4,8 +4,9 @@
 
 This skill enables AI coding agents to use, extend, and test the
 `github.com/AndrewDonelson/strata` package correctly and efficiently.
-Strata is a **three-tier auto-caching data library for Go** that unifies
-in-memory cache (L1), Redis (L2), and PostgreSQL (L3) behind a single API.
+Strata is a **four-tier auto-caching data library for Go** that unifies
+in-memory cache (L1), Redis (L2), PostgreSQL (L3), and an optional
+peer-to-peer distributed ledger (L4) behind a single API.
 
 ---
 
@@ -18,8 +19,10 @@ import "github.com/AndrewDonelson/strata"
 Minimum requirements: Go 1.21+, PostgreSQL 14+, Redis 6+.
 The package is `package strata`.
 Internal sub-packages (`internal/l1`, `internal/l2`, `internal/l3`,
-`internal/codec`, `internal/clock`, `internal/metrics`) are **not** part of
-the public API—never import them in application code.
+`internal/l4`, `internal/codec`, `internal/clock`, `internal/metrics`)
+are **not** part of the public API — never import them in application code.
+(Exception: `internal/l4` may be imported directly when you need the
+distributed sync layer; see the L4 section below.)
 
 ---
 
@@ -703,6 +706,311 @@ go build -tags dev \
 | `l1WriteBufSize` | `512` | Capacity of the L1 async-write channel |
 | default L1 shards | `256` | Number of independent L1 shards |
 | `defaultInvalidationChannel` | `"strata:invalidate"` | Redis pub/sub channel for cross-node invalidation |
+
+---
+
+## L4 — Distributed Sync Layer
+
+### Package identity
+
+```
+import "github.com/AndrewDonelson/strata/internal/l4"
+```
+
+Package name: `l4`. This is an **internal** package — it is **not** exposed through the main `strata` package. Applications that need L4 must import it directly.
+
+Minimum requirements: Go 1.21+. No database or Redis needed for peer mode.
+
+---
+
+### Overview
+
+L4 is an optional, standalone peer-to-peer gossip layer. Records are Ed25519-signed, SHA-256 hash-chained, and replicated across peers. No central coordinator; no leader election.
+
+Two modes:
+- `"peer"` — in-memory, ephemeral, no disk I/O.
+- `"ledger"` — BoltDB-backed, persistent, plus optional HTTP API.
+
+---
+
+### Constructors
+
+```go
+// New auto-creates a fresh signer, MemStore, and MemTransport from config.
+layer, err := l4.New(cfg l4.Config) (l4.L4Layer, error)
+
+// NewWithComponents injects all dependencies (preferred for testing and production ledger).
+layer, err := l4.NewWithComponents(
+    cfg       l4.Config,
+    signer    l4.L4Signer,    // nil = anonymous node
+    store     l4.L4Store,
+    transport l4.L4Transport,
+) (l4.L4Layer, error)
+
+// DefaultConfig returns sane defaults with Enabled = false.
+cfg := l4.DefaultConfig()
+_ = cfg.Validate() // applies defaults, validates mode and quorum
+```
+
+---
+
+### `l4.Config` struct
+
+```go
+type Config struct {
+    Enabled        bool
+    Mode           string        // "peer" | "ledger"
+    Port           int           // default 7743
+    DataDir        string        // default "/var/lib/strata/l4"
+    SyncInterval   time.Duration // default 30s
+    MaxPeers       int           // default 50
+    Quorum         int           // default 3 — confirmations for pending→confirmed
+    BootstrapPeers []string      // "host:port" addresses to dial on start
+    DNSSeed        string        // DNS seed hostname for peer discovery
+    NodeKeyPath    string        // persist Ed25519 private key to this path
+}
+```
+
+Always call `cfg.Validate()` before `New` / `NewWithComponents`.
+
+---
+
+### `l4.L4Layer` interface
+
+```go
+type L4Layer interface {
+    Publish(appID, nodeID string, payload map[string]interface{}) (L4Record, error)
+    Query(appID, recordID string) (L4Record, error)
+    Revoke(appID, recordID string) error
+    Subscribe(appID string, handler RecordHandler) error
+    Unsubscribe(appID string) error
+    Status() L4Status
+    PeerCount() int
+    Shutdown() error
+}
+
+type RecordHandler func(rec L4Record)
+```
+
+---
+
+### Data types
+
+```go
+type L4Record struct {
+    UUID       string
+    AppID      string
+    Payload    map[string]interface{}
+    Hash       string      // SHA-256 over prevHash|appID|uuid|payload|timestamp
+    PrevHash   string      // "genesis" for first record in AppID chain
+    Timestamp  int64       // UnixNano
+    VerifiedAt string      // "YYYY-MM"
+    NodeID     string      // Ed25519 public key hex of publisher
+    NodeSig    []byte      // Ed25519 signature
+    UserSig    []byte      // optional application-level signature
+    Revoked    bool
+    Confirmed  bool
+    Status     string      // "pending" | "confirmed" | "revoked"
+}
+
+type L4Status struct {
+    Enabled     bool
+    Mode        string   // "peer" or "ledger"
+    PeerCount   int
+    BlockHeight int64
+    Pending     int
+    NodeID      string   // this node's public key hex
+    Uptime      string
+}
+
+type L4Peer struct {
+    Address     string
+    NodeID      string
+    LastSeen    time.Time
+    BlockHeight int64
+    Latency     time.Duration
+    Trusted     bool
+}
+```
+
+Status constants:
+
+```go
+l4.StatusPending   = "pending"
+l4.StatusConfirmed = "confirmed"
+l4.StatusRevoked   = "revoked"
+l4.GenesisHash     = "genesis"
+```
+
+---
+
+### `l4.L4Signer`
+
+```go
+type L4Signer interface {
+    PublicKeyHex() string
+    Sign(record *L4Record) ([]byte, error)
+    Verify(record *L4Record, publicKeyHex string, sig []byte) bool
+    CanonicalBytes(record *L4Record) []byte
+}
+
+signer, err := l4.NewSigner()                            // fresh Ed25519 keypair
+signer  =      l4.NewSignerFromKey(privKey ed25519.PrivateKey) // from existing key
+```
+
+---
+
+### `l4.L4Store`
+
+```go
+type L4Store interface {
+    Put(record L4Record) error
+    Get(appID, uuid string) (*L4Record, error)
+    GetByHash(hash string) (*L4Record, error)
+    Latest(appID string, limit int) ([]L4Record, error)
+    Height() (int64, error)
+    Close() error
+}
+
+store        := l4.NewMemStore()              // in-memory; peer mode and tests
+store, err   := l4.NewBoltStore(dataDir)      // BoltDB; ledger mode
+```
+
+---
+
+### `l4.L4Transport`
+
+```go
+type L4Transport interface {
+    Listen(addr string) error
+    Connect(peer L4Peer) error
+    Disconnect(nodeID string) error
+    Broadcast(msg L4Message) error
+    Send(nodeID string, msg L4Message) error
+    Peers() []L4Peer
+    Close() error
+}
+
+transport := l4.NewTCPTransport(nodeID string, maxPeers int, handler)
+// In-process:
+hub       := l4.NewMemTransportHub()
+transport  = l4.NewMemTransport(nodeID string, maxPeers int, hub, handler)
+hub.Connect(nodeIDA, nodeIDB) // wire two nodes together
+```
+
+---
+
+### HTTP API Server
+
+```go
+srv := l4.NewAPIServer(layer l4.L4Layer, store l4.L4Store, transport l4.L4Transport) *APIServer
+go srv.Listen(":8080")                        // blocks; call in goroutine
+ln, _ := net.Listen("tcp", "127.0.0.1:0")
+go srv.ListenOnListener(ln)                   // ephemeral port (tests)
+_ = srv.Shutdown(context.Background())
+```
+
+Endpoints:
+
+| Method | Path | Returns |
+|--------|------|---------|
+| `GET` | `/query/{uuid}?app_id=X` | `L4Record` JSON or 404 |
+| `GET` | `/peers` | `[]L4Peer` JSON |
+| `POST` | `/sync` | `{"height": N}` |
+
+Rate: 100 req/min per IP. CORS: `Access-Control-Allow-Origin: *`.
+
+---
+
+### Errors
+
+```go
+l4.ErrL4Disabled        // Enabled: false
+l4.ErrInvalidL4Mode     // Mode not "peer"/"ledger"
+l4.ErrInvalidQuorum     // Quorum < 1
+l4.ErrAlreadyPublished  // duplicate UUID+AppID
+l4.ErrAlreadyRevoked    // already revoked
+l4.ErrNotFound          // no record found locally
+l4.ErrInvalidSignature  // signature verification failed
+l4.ErrChainBreak        // hash chain integrity violated
+l4.ErrNoPeers           // no connected peers
+l4.ErrQuorumNotMet      // still pending (not enough confirmations)
+l4.ErrStoreUnavailable  // store not accessible (peer mode restriction)
+l4.ErrAlreadyExists     // store: record already exists
+```
+
+All compatible with `errors.Is`.
+
+---
+
+### Testing patterns
+
+#### Disabled layer (zero cost)
+
+```go
+layer, _ := l4.New(l4.Config{Enabled: false})
+// all methods return ErrL4Disabled
+```
+
+#### Two in-process nodes
+
+```go
+hub := l4.NewMemTransportHub()
+cfg := l4.Config{Enabled: true, Mode: "peer", Quorum: 1}
+_ = cfg.Validate()
+
+sigA, _ := l4.NewSigner()
+sigB, _ := l4.NewSigner()
+lA, _ := l4.NewWithComponents(cfg, sigA, l4.NewMemStore(),
+    l4.NewMemTransport(sigA.PublicKeyHex(), 10, hub, nil))
+lB, _ := l4.NewWithComponents(cfg, sigB, l4.NewMemStore(),
+    l4.NewMemTransport(sigB.PublicKeyHex(), 10, hub, nil))
+defer lA.Shutdown(); defer lB.Shutdown()
+
+hub.Connect(sigA.PublicKeyHex(), sigB.PublicKeyHex())
+
+rec, _ := lA.Publish("app", "node-a", map[string]interface{}{"k": "v"})
+time.Sleep(50 * time.Millisecond)
+got, err := lB.Query("app", rec.UUID)
+```
+
+#### Ledger with BoltDB
+
+```go
+dir := t.TempDir()
+store, _ := l4.NewBoltStore(dir)
+defer store.Close()
+cfg := l4.Config{Enabled: true, Mode: "ledger", Quorum: 1}
+_ = cfg.Validate()
+signer, _ := l4.NewSigner()
+hub := l4.NewMemTransportHub()
+layer, _ := l4.NewWithComponents(cfg, signer, store,
+    l4.NewMemTransport(signer.PublicKeyHex(), 10, hub, nil))
+defer layer.Shutdown()
+```
+
+#### HTTP API server (ephemeral port)
+
+```go
+srv := l4.NewAPIServer(layer, store, transport)
+ln, _ := net.Listen("tcp", "127.0.0.1:0")
+go srv.ListenOnListener(ln)
+defer srv.Shutdown(context.Background())
+
+resp, _ := http.Get("http://" + ln.Addr().String() + "/peers")
+```
+
+---
+
+### Anti-patterns
+
+| ❌ Don't | ✅ Do instead |
+|----------|--------------|
+| Import `internal/l4` from outside this module | It is intentionally internal — use it only within the `strata` module |
+| Create `New(cfg)` then immediately call `Shutdown` without any operations | At minimum call `Status()` to test connectivity |
+| Use `NewBoltStore` in tests without `t.TempDir()` | Always use `t.TempDir()` to avoid leftover files |
+| Use Quorum > num nodes in a test | Set `Quorum: 1` in unit tests; only raise in integration tests where real peers exist |
+| Skip `cfg.Validate()` | Always call it — it applies defaults and catches bad Mode/Quorum values |
 
 ---
 
