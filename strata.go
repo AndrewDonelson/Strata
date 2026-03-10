@@ -19,7 +19,7 @@ import (
 	"github.com/AndrewDonelson/strata/internal/codec"
 	"github.com/AndrewDonelson/strata/internal/l1"
 	"github.com/AndrewDonelson/strata/internal/l2"
-	"github.com/AndrewDonelson/strata/internal/l3"
+	l3pkg "github.com/AndrewDonelson/strata/internal/l3"
 	l4pkg "github.com/AndrewDonelson/strata/internal/l4"
 	"github.com/AndrewDonelson/strata/internal/metrics"
 	"github.com/jackc/pgx/v5"
@@ -110,6 +110,11 @@ type Config struct {
 
 	// Encryption key (must be 32 bytes for AES-256-GCM; nil = disabled).
 	EncryptionKey []byte
+
+	// EmbeddingProvider — required when any registered schema has a strata:"vector" field.
+	// If nil and a vector schema is registered, ds.Migrate() returns ErrNoEmbeddingProvider.
+	// Use NewOllamaProvider or NewOpenAIProvider to create a provider.
+	EmbeddingProvider EmbeddingProvider
 }
 
 func (c *Config) defaults() {
@@ -168,7 +173,7 @@ type l3Backend interface {
 }
 
 // Compile-time assertion: *l3.Store must implement l3Backend.
-var _ l3Backend = (*l3.Store)(nil)
+var _ l3Backend = (*l3pkg.Store)(nil)
 
 // ────────────────────────────────────────────────────────────────────────────
 // Stats
@@ -272,7 +277,7 @@ func NewDataStore(cfg Config) (*DataStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("strata: postgres pool: %w", err)
 		}
-		ds.l3 = l3.New(pool, nil)
+		ds.l3 = l3pkg.New(pool, nil)
 	}
 
 	// L4 distributed sync layer (optional)
@@ -372,9 +377,64 @@ func structToL4Payload(value any) (map[string]interface{}, error) {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Register compiles and stores a Schema definition.
+// Returns ErrInvalidTagForType if a strata:"vector" tag is applied to a
+// non-pgvector.Vector field, or ErrInvalidIndexType if an IVFFlat/HNSW index
+// is applied to a non-vector field.
 func (ds *DataStore) Register(s Schema) error {
-	_, err := ds.registry.register(s)
-	return err
+	cs, err := ds.registry.register(s)
+	if err != nil {
+		return err
+	}
+	return ds.validateAndWireVectorSchema(cs, s)
+}
+
+// validateAndWireVectorSchema validates vector field types and index types,
+// then populates cs.vectorDimension from the EmbeddingProvider if available.
+func (ds *DataStore) validateAndWireVectorSchema(cs *compiledSchema, s Schema) error {
+	pgvecType := l3pkg.PgvectorType()
+
+	// 1. Validate: any strata:"vector" field must be of type pgvector.Vector
+	if cs.hasVectorFields {
+		for _, col := range cs.columns {
+			if col.IsVector {
+				ft := cs.modelType.Field(col.FieldIndex).Type
+				if ft != pgvecType {
+					return fmt.Errorf("%w: field %q has type %s, expected pgvector.Vector",
+						ErrInvalidTagForType, col.FieldName, ft)
+				}
+			}
+		}
+	}
+
+	// 2. Validate: IVFFlat / HNSW indexes must target a vector field
+	vectorFieldNames := make(map[string]bool)
+	for _, col := range cs.columns {
+		if col.IsVector {
+			vectorFieldNames[col.Name] = true
+		}
+	}
+	for _, idx := range s.Indexes {
+		if idx.Type == IndexIVFFlat || idx.Type == IndexHNSW {
+			if len(idx.Fields) == 0 {
+				return fmt.Errorf("%w: index %q has no fields", ErrInvalidIndexType, idx.Name)
+			}
+			if !vectorFieldNames[idx.Fields[0]] {
+				return fmt.Errorf("%w: index on field %q is not a vector field",
+					ErrInvalidIndexType, idx.Fields[0])
+			}
+		}
+	}
+
+	// 3. Wire dimension from EmbeddingProvider (if present) and validate it.
+	if cs.hasVectorFields && ds.cfg.EmbeddingProvider != nil {
+		cs.vectorDimension = ds.cfg.EmbeddingProvider.Dimensions()
+		if cs.vectorDimension <= 0 {
+			return fmt.Errorf("%w: provider %q returned dimension %d",
+				ErrVectorDimensionMismatch, ds.cfg.EmbeddingProvider.ModelID(), cs.vectorDimension)
+		}
+	}
+
+	return nil
 }
 
 // ────────────────────────────────────────────────────────────────────────────

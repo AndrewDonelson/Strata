@@ -69,7 +69,15 @@ L4 (optional, independent of the read path above):
     - [L4 Transport Options](#l4-transport-options)
     - [L4 Store Options](#l4-store-options)
     - [L4 Testing Patterns](#l4-testing-patterns)
-16. [Contributing](#contributing)
+16. [Vector Search (L3 Semantic Layer)](#vector-search-l3-semantic-layer)
+    - [Prerequisites](#prerequisites)
+    - [Embedding Provider](#embedding-provider)
+    - [Vector Schema](#vector-schema)
+    - [VectorSearch](#vectorsearch)
+    - [ReEmbed — Model Migration](#reembed--model-migration)
+    - [Vector Index Types](#vector-index-types)
+    - [Vector Errors](#vector-errors)
+17. [Contributing](#contributing)
 
 ---
 
@@ -79,7 +87,7 @@ L4 (optional, independent of the read path above):
 go get github.com/AndrewDonelson/strata
 ```
 
-**Requirements:** Go 1.21+, PostgreSQL 14+, Redis 6+
+**Requirements:** Go 1.21+, PostgreSQL 14+ with [pgvector](https://github.com/pgvector/pgvector) extension (optional — required only for vector search), Redis 6+
 
 ---
 
@@ -193,6 +201,7 @@ Control column behaviour in PostgreSQL and caching behaviour with `strata` struc
 | `nullable` | column is NULL-able (default: NOT NULL) |
 | `omit_cache` | field excluded from L1 **and** L2 — stored in Postgres only |
 | `omit_l1` | field excluded from L1 only; still cached in L2 |
+| `vector` | marks field as a `vector(N)` column in Postgres; implies `omit_cache` (never in L1/L2); field type must be `pgvector.Vector`; dimension is set automatically from `Config.EmbeddingProvider.Dimensions()` |
 | `default:X` | generates `DEFAULT X` in the DDL |
 | `auto_now_add` | set to `time.Now()` on first insert, never updated |
 | `auto_now` | set to `time.Now()` on every write |
@@ -223,6 +232,7 @@ type User struct {
 | `bool` | `BOOLEAN` |
 | `time.Time` | `TIMESTAMPTZ` |
 | `[]byte` | `BYTEA` |
+| `pgvector.Vector` | `vector(N)` (requires pgvector extension) |
 | struct / map / slice | `JSONB` |
 
 ### Cache Policies
@@ -695,6 +705,20 @@ strata.ErrHookPanic // BeforeSet/BeforeGet hook panicked (recovered)
 
 // Write-behind
 strata.ErrWriteBehindMaxRetry // dirty entry exceeded max retry count
+
+// Vector Search
+strata.ErrNoVectorField            // schema has no strata:"vector" field
+strata.ErrPgvectorExtensionMissing // CREATE EXTENSION vector not installed
+strata.ErrVectorDimensionMismatch  // provider dimension changed since last migration
+strata.ErrInvalidIndexType         // IVFFlat/HNSW index on non-vector field
+strata.ErrTopKInvalid              // topK < 1
+strata.ErrNoEmbeddingProvider      // Config.EmbeddingProvider is nil
+strata.ErrEmbeddingModelChanged    // provider model ID changed since last migration
+strata.ErrReEmbedAlreadyRunning    // another ReEmbed is already in progress
+strata.ErrReEmbedTextFieldMissing  // textFieldName not found in model struct
+strata.ErrInvalidTagForType        // strata:"vector" on a non-pgvector.Vector field
+strata.ErrEmptyVectorQuery         // blank query string passed to VectorSearch
+strata.ErrNilContext               // nil context passed to VectorSearch or ReEmbed
 ```
 
 ---
@@ -714,6 +738,8 @@ Strata accepts any `redis.UniversalClient` (standalone, Sentinel, or Cluster). K
 ### L3 — PostgreSQL
 
 Strata uses `pgxpool` for connection pooling. `SetMany` uses the PostgreSQL COPY protocol for bulk inserts. Upsert is `INSERT … ON CONFLICT DO UPDATE`. Read replica connections (PostgresPolicy.ReadReplica) are used for `Search` and `Count` queries.
+
+When `pgvector` is installed, L3 also stores `vector(N)` columns and executes ANN similarity queries via `VectorSearch`. Vector fields are **never** held in L1 or L2 — they are L3-only by design.
 
 ### L4 — Distributed Gossip Ledger
 
@@ -996,6 +1022,148 @@ _ = ds.Register(strata.Schema{
     L4:    strata.L4Policy{Enabled: true},
 })
 ```
+
+---
+
+## Vector Search (L3 Semantic Layer)
+
+Strata supports first-class approximate nearest-neighbour (ANN) search via the [pgvector](https://github.com/pgvector/pgvector) Postgres extension. Strata owns the full embedding lifecycle — it calls your provider, stores vectors, indexes them, and detects model changes automatically.
+
+### Prerequisites
+
+1. Install the pgvector extension on your Postgres server:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+2. Add the Go dependency:
+
+```bash
+go get github.com/pgvector/pgvector-go
+```
+
+3. Set `Config.EmbeddingProvider` — no dimension numbers needed in application code.
+
+### Embedding Provider
+
+```go
+// Built-in: Ollama (local / on-prem)
+prov := strata.NewOllamaProvider("http://localhost:11434", "nomic-embed-text")
+// Dimension auto-detected from the first Embed() call and cached.
+
+// Built-in: OpenAI-compatible APIs
+prov := strata.NewOpenAIProvider(os.Getenv("OPENAI_API_KEY"), "text-embedding-3-small")
+```
+
+Both implement the `EmbeddingProvider` interface:
+
+```go
+type EmbeddingProvider interface {
+    Embed(ctx context.Context, text string) (pgvector.Vector, error)
+    Dimensions() int   // called once at Register time to size the Postgres column
+    ModelID() string   // stored in strata_schema_meta; change triggers ErrEmbeddingModelChanged
+}
+```
+
+### Vector Schema
+
+```go
+import pgvector "github.com/pgvector/pgvector-go"
+
+type FAQ struct {
+    ID         string          `strata:"primary_key"`
+    Question   string
+    CustomerID string
+    Embedding  pgvector.Vector `strata:"vector"` // L3-only; never in L1/L2
+}
+
+ds, _ := strata.NewDataStore(strata.Config{
+    PostgresDSN:       os.Getenv("POSTGRES_DSN"),
+    EmbeddingProvider: strata.NewOllamaProvider("http://localhost:11434", "nomic-embed-text"),
+})
+
+ds.Register(strata.Schema{
+    Name:  "faq",
+    Model: &FAQ{},
+    Indexes: []strata.Index{
+        {
+            Fields:         []string{"embedding"},
+            Type:           strata.IndexHNSW,
+            M:              16,
+            EfConstruction: 64,
+            DistanceFunc:   "cosine",
+        },
+    },
+})
+ds.Migrate(ctx) // creates vector(768) column + HNSW index; checks extension
+```
+
+`Migrate()` also creates the internal `strata_schema_meta` table which tracks the model ID and dimension for each vector schema. If you switch models, `Migrate()` returns `ErrEmbeddingModelChanged` and you call `ReEmbed` explicitly — no silent data corruption.
+
+### VectorSearch
+
+Pass a plain text query — Strata embeds it internally:
+
+```go
+results, err := ds.VectorSearch(ctx, "faq", "How do I get a refund?", 10,
+    map[string]any{"customer_id": "cust-42"},  // optional column filters
+)
+for _, r := range results {
+    faq := r.Value.(*FAQ)
+    fmt.Printf("score=%.4f  %s\n", r.Score, faq.Question)
+}
+```
+
+`SimilarityResult` fields:
+
+```go
+type SimilarityResult struct {
+    ID    string   // primary key of the matching record
+    Score float64  // cosine similarity: 1.0 = identical, 0.0 = orthogonal
+    Value any      // fully-hydrated model struct (*FAQ in the example above)
+}
+```
+
+Results are automatically back-filled into L2 and L1 after the query (vector field stripped before cache storage — by design).
+
+### ReEmbed — Model Migration
+
+When you switch to a new embedding model:
+
+```go
+// 1. Update Config.EmbeddingProvider to the new model.
+// 2. ds.Migrate(ctx) will return ErrEmbeddingModelChanged — this is expected.
+// 3. Re-embed all existing records:
+err := ds.ReEmbed(ctx, "faq", "Question")  // textFieldName is the struct field to re-embed
+```
+
+`ReEmbed` is resumable — if interrupted (e.g. context cancel), a subsequent call picks up from where it left off. Progress is tracked in `strata_schema_meta.reembed_progress`.
+
+### Vector Index Types
+
+| Constant | Postgres index | `Index` fields |
+|---|---|---|
+| `strata.IndexDefault` (empty) | btree / sequential scan | — |
+| `strata.IndexIVFFlat` | `ivfflat` | `Lists` (default 100) |
+| `strata.IndexHNSW` | `hnsw` | `M` (default 16), `EfConstruction` (default 64) |
+| `strata.IndexTrigram` | `gin` + pg_trgm | for trigram text similarity |
+
+Distance functions (`DistanceFunc` field): `"cosine"` (default), `"l2"`, `"ip"` (inner product).
+
+**Rule of thumb:** HNSW for high-recall production workloads; IVFFlat for faster index build time on large tables (set `Lists ≈ sqrt(row_count)`).
+
+### Vector Errors
+
+See [Error Reference](#error-reference) for the full list. Key ones:
+
+| Error | When |
+|---|---|
+| `ErrPgvectorExtensionMissing` | `CREATE EXTENSION vector` not run |
+| `ErrEmbeddingModelChanged` | provider `ModelID()` differs from stored value — call `ReEmbed` |
+| `ErrVectorDimensionMismatch` | provider `Dimensions()` changed — update your model or provider |
+| `ErrNoEmbeddingProvider` | `Config.EmbeddingProvider` is nil |
+| `ErrReEmbedAlreadyRunning` | `ReEmbed` already in progress for this schema |
 
 ---
 

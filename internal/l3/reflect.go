@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	pgvector "github.com/pgvector/pgvector-go"
 )
 
 // ColumnDef describes one table column derived from struct reflection.
@@ -28,6 +30,7 @@ type ColumnDef struct {
 	IsUnique     bool
 	IsIndexed    bool
 	IsEncrypted  bool
+	IsVector     bool // set by strata:"vector" tag; implies OmitCache (L3-only)
 	FieldIndex   int
 	FieldName    string
 }
@@ -82,6 +85,9 @@ func flattenStruct(t reflect.Type, cols *[]ColumnDef) {
 				col.IsAutoNow = true
 			case part == "encrypted":
 				col.IsEncrypted = true
+			case part == "vector":
+				col.IsVector = true
+				col.OmitCache = true // vector fields are never in L1/L2
 			case strings.HasPrefix(part, "default:"):
 				col.DefaultValue = strings.TrimPrefix(part, "default:")
 			}
@@ -90,10 +96,17 @@ func flattenStruct(t reflect.Type, cols *[]ColumnDef) {
 	}
 }
 
+// pgvectorType is a cached reference to the reflect.Type of pgvector.Vector.
+var pgvectorType = reflect.TypeOf(pgvector.Vector{})
+
 // goTypeToSQL maps a Go reflect.Type to the appropriate Postgres column type.
 func goTypeToSQL(t reflect.Type) string {
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
+	}
+	// pgvector.Vector → placeholder; actual DDL uses vector(N) once dimension is known
+	if t == pgvectorType {
+		return "VECTOR"
 	}
 	switch t.Kind() {
 	case reflect.String:
@@ -128,6 +141,10 @@ func goTypeToSQL(t reflect.Type) string {
 		return "TEXT"
 	}
 }
+
+// PgvectorType returns the reflect.Type of pgvector.Vector.
+// Used by schema validation in the strata package.
+func PgvectorType() reflect.Type { return pgvectorType }
 
 // ToSnakeCase converts CamelCase to snake_case.
 func ToSnakeCase(s string) string {

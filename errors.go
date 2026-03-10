@@ -60,3 +60,19 @@ var (
 var (
 	ErrInsufficientFunds = errors.New("strata: insufficient funds")
 )
+
+// Vector / pgvector errors
+var (
+	ErrNoVectorField            = errors.New("strata: schema has no vector field")
+	ErrPgvectorExtensionMissing = errors.New("strata: pgvector extension not installed; run: CREATE EXTENSION IF NOT EXISTS vector;")
+	ErrVectorDimensionMismatch  = errors.New("strata: vector dimension does not match index")
+	ErrInvalidIndexType         = errors.New("strata: invalid index type for field")
+	ErrTopKInvalid              = errors.New("strata: topK must be >= 1")
+	ErrNoEmbeddingProvider      = errors.New("strata: EmbeddingProvider is required for vector schemas; set Config.EmbeddingProvider to NewOllamaProvider or NewOpenAIProvider")
+	ErrEmbeddingModelChanged    = errors.New("strata: embedding model has changed since last migration; call ds.ReEmbed() to migrate")
+	ErrReEmbedAlreadyRunning    = errors.New("strata: re-embed migration already in progress")
+	ErrReEmbedTextFieldMissing  = errors.New("strata: specified text field not found in schema model")
+	ErrInvalidTagForType        = errors.New("strata: strata:\"vector\" tag requires field type pgvector.Vector")
+	ErrEmptyVectorQuery         = errors.New("strata: vector query string must not be empty")
+	ErrNilContext               = errors.New("strata: context must not be nil")
+)
