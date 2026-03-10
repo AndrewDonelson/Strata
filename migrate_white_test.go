@@ -30,7 +30,7 @@ func mustCompileSchema(t *testing.T, s Schema) *compiledSchema {
 
 func TestBuildColumnDef_PrimaryKey(t *testing.T) {
 	col := l3.ColumnDef{Name: "id", SQLType: "TEXT", IsPK: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "id TEXT")
 	assert.Contains(t, result, "PRIMARY KEY")
 	// PK should not add UNIQUE or NOT NULL separately
@@ -40,50 +40,50 @@ func TestBuildColumnDef_PrimaryKey(t *testing.T) {
 
 func TestBuildColumnDef_NotNull(t *testing.T) {
 	col := l3.ColumnDef{Name: "username", SQLType: "TEXT"}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "NOT NULL")
 }
 
 func TestBuildColumnDef_Nullable(t *testing.T) {
 	col := l3.ColumnDef{Name: "notes", SQLType: "TEXT", IsNullable: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.NotContains(t, result, "NOT NULL")
 }
 
 func TestBuildColumnDef_Unique(t *testing.T) {
 	col := l3.ColumnDef{Name: "email", SQLType: "TEXT", IsUnique: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "UNIQUE")
 }
 
 func TestBuildColumnDef_DefaultValue(t *testing.T) {
 	col := l3.ColumnDef{Name: "level", SQLType: "BIGINT", DefaultValue: "1"}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "DEFAULT 1")
 }
 
 func TestBuildColumnDef_AutoNowAdd_Timestamp(t *testing.T) {
 	col := l3.ColumnDef{Name: "created_at", SQLType: "TIMESTAMPTZ", IsAutoNowAdd: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "DEFAULT now()")
 }
 
 func TestBuildColumnDef_AutoNow_Timestamp(t *testing.T) {
 	col := l3.ColumnDef{Name: "updated_at", SQLType: "TIMESTAMPTZ", IsAutoNow: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "DEFAULT now()")
 }
 
 func TestBuildColumnDef_AutoNow_NonTimestamp_NoDefault(t *testing.T) {
 	// auto_now on non-timestamp type should NOT add DEFAULT now()
 	col := l3.ColumnDef{Name: "some_field", SQLType: "TEXT", IsAutoNow: true}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.NotContains(t, result, "DEFAULT now()")
 }
 
 func TestBuildColumnDef_UniqueAndInsideNotNull(t *testing.T) {
 	col := l3.ColumnDef{Name: "code", SQLType: "TEXT", IsUnique: true, IsNullable: false}
-	result := buildColumnDef(col)
+	result := buildColumnDef(col, 0)
 	assert.Contains(t, result, "UNIQUE")
 	assert.Contains(t, result, "NOT NULL")
 }

@@ -23,6 +23,8 @@ import (
 // ────────────────────────────────────────────────────────────────────────────
 
 // colNames returns the DB column names for all non-omitted columns.
+// Excludes OmitCache fields (including vector fields) — used for L1/L2 operations
+// and Search/WarmCache queries where vector data is not needed.
 func colNames(cs *compiledSchema) []string {
 	names := make([]string, 0, len(cs.columns))
 	for _, col := range cs.columns {
@@ -31,6 +33,43 @@ func colNames(cs *compiledSchema) []string {
 		}
 	}
 	return names
+}
+
+// colNamesWithVector returns DB column names including vector fields.
+// Used for L3 SELECT queries in routerGet / readFromL3 where the full record
+// (including the vector field) is needed for cache-warming.
+func colNamesWithVector(cs *compiledSchema) []string {
+	names := make([]string, 0, len(cs.columns))
+	for _, col := range cs.columns {
+		if !col.OmitCache || col.IsVector {
+			names = append(names, col.Name)
+		}
+	}
+	return names
+}
+
+// stripVectors returns a shallow copy of value with all vector fields zeroed out,
+// so they are not stored in L1 or L2. If the schema has no vector fields the
+// original value is returned unchanged.
+func stripVectors(cs *compiledSchema, value any) any {
+	if !cs.hasVectorFields {
+		return value
+	}
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	copy := reflect.New(v.Type()).Elem()
+	copy.Set(v)
+	for _, col := range cs.columns {
+		if col.IsVector {
+			f := copy.FieldByName(col.FieldName)
+			if f.IsValid() && f.CanSet() {
+				f.Set(reflect.Zero(f.Type()))
+			}
+		}
+	}
+	return copy.Addr().Interface()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -236,6 +275,10 @@ func (ds *DataStore) routerSearch(ctx context.Context, cs *compiledSchema, q *Qu
 // ────────────────────────────────────────────────────────────────────────────
 
 func (ds *DataStore) setL1(cs *compiledSchema, key string, value any) {
+	// Strip vector fields — they must not be stored in L1 cache.
+	if cs.hasVectorFields {
+		value = stripVectors(cs, value)
+	}
 	ttl := cs.L1.TTL
 	if ttl == 0 {
 		ttl = ds.cfg.DefaultL1TTL
@@ -244,6 +287,10 @@ func (ds *DataStore) setL1(cs *compiledSchema, key string, value any) {
 }
 
 func (ds *DataStore) setL2(ctx context.Context, cs *compiledSchema, id string, value any) error {
+	// Strip vector fields — they must not be stored in L2 (Redis) cache.
+	if cs.hasVectorFields {
+		value = stripVectors(cs, value)
+	}
 	ttl := cs.L2.TTL
 	if ttl == 0 {
 		ttl = ds.cfg.DefaultL2TTL
@@ -252,7 +299,8 @@ func (ds *DataStore) setL2(ctx context.Context, cs *compiledSchema, id string, v
 }
 
 func (ds *DataStore) readFromL3(ctx context.Context, cs *compiledSchema, id string, dest any) error {
-	cols := colNames(cs)
+	// Include vector fields in the SELECT so Get() from L3 returns the full record.
+	cols := colNamesWithVector(cs)
 	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s = $1",
 		strings.Join(cols, ", "), cs.tableName, cs.pkColumn.Name)
 	row := ds.l3.QueryRow(ctx, sql, []any{id})
@@ -261,7 +309,7 @@ func (ds *DataStore) readFromL3(ctx context.Context, cs *compiledSchema, id stri
 	if destVal.Kind() == reflect.Ptr {
 		destVal = destVal.Elem()
 	}
-	dests := buildScanDest(destVal, cs)
+	dests := buildScanDestWithVector(destVal, cs)
 	if err := row.Scan(dests...); err != nil {
 		if isNoRowsError(err) {
 			return ErrNotFound
@@ -309,12 +357,13 @@ func (ds *DataStore) writeToL3(ctx context.Context, cs *compiledSchema, value an
 		_ = ds.decryptFields(cs, val)
 	}()
 
-	// Collect columns and values
+	// Collect columns and values.
+	// OmitCache fields are excluded UNLESS they are vector fields (which are L3-only).
 	cols := make([]string, 0, len(cs.columns))
 	vals := make([]any, 0, len(cs.columns))
 	for _, col := range cs.columns {
-		if col.OmitCache {
-			continue
+		if col.OmitCache && !col.IsVector {
+			continue // skip non-vector omit_cache fields
 		}
 		f := val.FieldByName(col.FieldName)
 		if !f.IsValid() {
@@ -335,6 +384,25 @@ func buildScanDest(val reflect.Value, cs *compiledSchema) []any {
 	for _, col := range cs.columns {
 		if col.OmitCache {
 			continue
+		}
+		f := val.FieldByName(col.FieldName)
+		if !f.IsValid() || !f.CanAddr() {
+			var dummy any
+			dests = append(dests, &dummy)
+			continue
+		}
+		dests = append(dests, f.Addr().Interface())
+	}
+	return dests
+}
+
+// buildScanDestWithVector is like buildScanDest but also includes vector fields.
+// Used by readFromL3 to populate the full record including the embedding.
+func buildScanDestWithVector(val reflect.Value, cs *compiledSchema) []any {
+	dests := make([]any, 0, len(cs.columns))
+	for _, col := range cs.columns {
+		if col.OmitCache && !col.IsVector {
+			continue // skip non-vector omit_cache columns
 		}
 		f := val.FieldByName(col.FieldName)
 		if !f.IsValid() || !f.CanAddr() {
