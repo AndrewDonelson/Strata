@@ -64,11 +64,26 @@ type L4Policy struct {
 	SyncDeletes bool   // if true, Delete() → L4 Revoke(); false = L4 record is left as-is
 }
 
+// IndexType determines what kind of database index is created.
+type IndexType string
+
+const (
+	IndexDefault IndexType = ""        // standard btree
+	IndexIVFFlat IndexType = "ivfflat" // pgvector IVFFlat ANN index
+	IndexHNSW    IndexType = "hnsw"    // pgvector HNSW ANN index
+	IndexTrigram IndexType = "gin"     // pg_trgm GIN index for text search
+)
+
 // Index defines a database index on one or more columns.
 type Index struct {
-	Fields []string
-	Unique bool
-	Name   string
+	Fields         []string // column names
+	Unique         bool
+	Name           string    // optional; auto-generated if empty
+	Type           IndexType // IndexDefault (btree) | IndexIVFFlat | IndexHNSW | IndexTrigram
+	Lists          int       // IVFFlat: number of lists (default: 100)
+	M              int       // HNSW: max connections per layer (default: 16)
+	EfConstruction int       // HNSW: build-time search width (default: 64)
+	DistanceFunc   string    // "cosine" | "l2" | "ip" (default: "cosine")
 }
 
 // SchemaHooks provides optional lifecycle callbacks.
@@ -97,13 +112,16 @@ type Schema struct {
 // compiledSchema is the internal representation of a registered Schema.
 type compiledSchema struct {
 	Schema
-	columns   []l3.ColumnDef
-	pkColumn  l3.ColumnDef
-	pkIndex   int
-	tableName string
-	modelType reflect.Type
-	l1Prefix  string // pre-computed cs.Name+":", avoids fmt.Sprintf on every Get
-	l2Prefix  string // pre-computed cs.Name+":"+cs.Name+":", skips key() on the hot path
+	columns         []l3.ColumnDef
+	pkColumn        l3.ColumnDef
+	pkIndex         int
+	tableName       string
+	modelType       reflect.Type
+	l1Prefix        string        // pre-computed cs.Name+":", avoids fmt.Sprintf on every Get
+	l2Prefix        string        // pre-computed cs.Name+":"+cs.Name+":", skips key() on the hot path
+	vectorField     *l3.ColumnDef // non-nil if schema has a strata:"vector" field
+	vectorDimension int           // set from EmbeddingProvider.Dimensions() at Register time
+	hasVectorFields bool          // true if vectorField != nil (fast check for cache stripping)
 }
 
 // schemaRegistry holds all registered schemas.
@@ -168,6 +186,16 @@ func (r *schemaRegistry) register(s Schema) (*compiledSchema, error) {
 		l1Prefix:  s.Name + ":",
 		l2Prefix:  s.Name + ":" + s.Name + ":",
 	}
+
+	// Find vector field (if any) and set hasVectorFields flag
+	for i := range cs.columns {
+		if cs.columns[i].IsVector {
+			cs.vectorField = &cs.columns[i]
+			cs.hasVectorFields = true
+			break
+		}
+	}
+
 	r.schemas[s.Name] = cs
 	return cs, nil
 }

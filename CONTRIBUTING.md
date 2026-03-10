@@ -51,6 +51,7 @@ By participating you agree to abide by its terms.
 | Docker | latest (for integration tests via Testcontainers) |
 | Redis | 7+ (optional — tests spin one up automatically) |
 | PostgreSQL | 15+ (optional — tests spin one up automatically) |
+| pgvector | 0.5+ (optional — required for vector search integration tests; install with `CREATE EXTENSION IF NOT EXISTS vector;`) |
 
 ### Install dependencies
 
@@ -76,7 +77,9 @@ make all           # lint + vet + test + coverage report
    ```
 2. Make your changes, keeping commits small and focused.
 3. Add or update tests so that the package-level coverage does not decrease
-   below its current watermark (currently ≥ 97%).
+   below its current watermark (root package ≥ 73%, internal packages ≥ 95%).
+   Coverage for vector/embedding code that requires a live database or Ollama
+   service is excluded from the gate (those paths are integration-tested only).
 4. Run `make all` and verify it exits cleanly before opening a PR.
 
 ---
@@ -165,6 +168,9 @@ Use the **Feature request** issue template. Describe:
 |----------|---------|-------|
 | Unit / white-box | `go test -tags dev ./...` | No external services |
 | Integration | `go test -tags integration ./...` | Requires Docker |
+| Vector search | `STRATA_PGVECTOR_TEST_DSN=... go test ./...` | Requires Postgres + pgvector extension |
+| Ollama provider | `OLLAMA_TEST_URL=http://localhost:11434 go test ./...` | Requires local Ollama with `nomic-embed-text` |
+| OpenAI provider | `OPENAI_TEST_API_KEY=... go test ./...` | Requires OpenAI API key |
 | Coverage | `make cover` | Generates `coverage.out` + HTML report |
 | Benchmarks | `go test -bench=. -benchmem ./...` | |
 

@@ -38,9 +38,40 @@ func (ds *DataStore) Migrate(ctx context.Context) error {
 	if err := ds.ensureMigrationTable(ctx); err != nil {
 		return err
 	}
+
+	// Check whether any registered schema has a vector field.
+	hasVectorSchema := false
+	for _, cs := range ds.registry.all() {
+		if cs.hasVectorFields {
+			hasVectorSchema = true
+			break
+		}
+	}
+
+	// Only check for pgvector extension if there are vector schemas.
+	if hasVectorSchema {
+		if err := ds.checkPgvectorExtension(ctx); err != nil {
+			return err
+		}
+		// Provider must be configured
+		if ds.cfg.EmbeddingProvider == nil {
+			return ErrNoEmbeddingProvider
+		}
+		// Ensure meta table exists
+		if err := ds.ensureSchemaMetaTable(ctx); err != nil {
+			return err
+		}
+	}
+
 	for _, cs := range ds.registry.all() {
 		if err := ds.migrateSchema(ctx, cs); err != nil {
 			return fmt.Errorf("migrate schema %q: %w", cs.Name, err)
+		}
+		// Sync schema meta for vector schemas
+		if cs.hasVectorFields {
+			if err := ds.syncVectorSchemaMeta(ctx, cs); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -188,7 +219,7 @@ func (ds *DataStore) alterTable(ctx context.Context, cs *compiledSchema) error {
 		if _, seen := existing[col.Name]; seen {
 			continue
 		}
-		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", cs.tableName, buildColumnDef(col))
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", cs.tableName, buildColumnDef(col, cs.vectorDimension))
 		stmts = append(stmts, stmt)
 	}
 	if len(stmts) == 0 {
@@ -255,14 +286,21 @@ func (ds *DataStore) isMigrationApplied(ctx context.Context, fileName string) (b
 func buildCreateTableDDL(cs *compiledSchema) string {
 	var cols []string
 	for _, col := range cs.columns {
-		cols = append(cols, buildColumnDef(col))
+		cols = append(cols, buildColumnDef(col, cs.vectorDimension))
 	}
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
 		cs.tableName, strings.Join(cols, ",\n  "))
 }
 
-func buildColumnDef(col l3.ColumnDef) string {
-	def := col.Name + " " + col.SQLType
+func buildColumnDef(col l3.ColumnDef, vectorDim int) string {
+	sqlType := col.SQLType
+	if col.IsVector {
+		if vectorDim <= 0 {
+			vectorDim = 768 // safe fallback; should never be 0 in practice
+		}
+		sqlType = fmt.Sprintf("vector(%d)", vectorDim)
+	}
+	def := col.Name + " " + sqlType
 	if col.IsPK {
 		def += " PRIMARY KEY"
 	} else {
@@ -290,16 +328,126 @@ func buildIndexDDL(cs *compiledSchema) []string {
 		}
 	}
 	for _, idx := range cs.Indexes {
-		name := idx.Name
-		if name == "" {
-			name = fmt.Sprintf("idx_%s_%s", cs.tableName, strings.Join(idx.Fields, "_"))
+		out = append(out, buildOneIndexDDL(cs, idx))
+	}
+	return out
+}
+
+// buildOneIndexDDL emits a single CREATE INDEX statement, handling standard,
+// IVFFlat, and HNSW index types appropriately.
+func buildOneIndexDDL(cs *compiledSchema, idx Index) string {
+	name := idx.Name
+	if name == "" {
+		name = fmt.Sprintf("idx_%s_%s", cs.tableName, strings.Join(idx.Fields, "_"))
+	}
+
+	switch idx.Type {
+	case IndexIVFFlat:
+		distFunc := distanceOps(idx.DistanceFunc)
+		lists := idx.Lists
+		if lists <= 0 {
+			lists = 100
 		}
+		return fmt.Sprintf(
+			"CREATE INDEX IF NOT EXISTS %s ON %s USING ivfflat (%s %s) WITH (lists = %d)",
+			name, cs.tableName, idx.Fields[0], distFunc, lists)
+
+	case IndexHNSW:
+		distFunc := distanceOps(idx.DistanceFunc)
+		m := idx.M
+		if m <= 0 {
+			m = 16
+		}
+		ef := idx.EfConstruction
+		if ef <= 0 {
+			ef = 64
+		}
+		return fmt.Sprintf(
+			"CREATE INDEX IF NOT EXISTS %s ON %s USING hnsw (%s %s) WITH (m = %d, ef_construction = %d)",
+			name, cs.tableName, idx.Fields[0], distFunc, m, ef)
+
+	default:
 		unique := ""
 		if idx.Unique {
 			unique = "UNIQUE "
 		}
-		out = append(out, fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
-			unique, name, cs.tableName, strings.Join(idx.Fields, ", ")))
+		return fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
+			unique, name, cs.tableName, strings.Join(idx.Fields, ", "))
 	}
-	return out
+}
+
+// distanceOps converts a distance function name to the pgvector operator class name.
+func distanceOps(distFunc string) string {
+	switch strings.ToLower(distFunc) {
+	case "l2":
+		return "vector_l2_ops"
+	case "ip":
+		return "vector_ip_ops"
+	default: // "cosine" or empty
+		return "vector_cosine_ops"
+	}
+}
+
+// checkPgvectorExtension verifies the vector extension is installed in Postgres.
+func (ds *DataStore) checkPgvectorExtension(ctx context.Context) error {
+	const sql = `SELECT 1 FROM pg_extension WHERE extname = 'vector' LIMIT 1`
+	var dummy int
+	err := ds.l3.QueryRow(ctx, sql, nil).Scan(&dummy)
+	if err != nil {
+		if err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows") {
+			return ErrPgvectorExtensionMissing
+		}
+		return fmt.Errorf("pgvector extension check: %w", err)
+	}
+	return nil
+}
+
+// syncVectorSchemaMeta compares the current provider's model + dimension against
+// what is stored in strata_schema_meta and either inserts a new row or validates
+// the existing one. Returns an error if the model has changed or dimensions mismatch.
+func (ds *DataStore) syncVectorSchemaMeta(ctx context.Context, cs *compiledSchema) error {
+	provider := ds.cfg.EmbeddingProvider
+	if provider == nil {
+		return ErrNoEmbeddingProvider
+	}
+	if !cs.hasVectorFields || cs.vectorField == nil {
+		return nil
+	}
+
+	currentModel := provider.ModelID()
+	currentDim := cs.vectorDimension
+	if currentDim == 0 {
+		currentDim = provider.Dimensions()
+		cs.vectorDimension = currentDim
+	}
+
+	existing, err := ds.readSchemaMeta(ctx, cs.Name)
+	if err != nil {
+		return err
+	}
+
+	if existing == nil {
+		// No prior migration: insert meta row.
+		return ds.insertSchemaMeta(ctx, schemaMetaRow{
+			SchemaName:     cs.Name,
+			VectorField:    cs.vectorField.Name,
+			EmbeddingModel: currentModel,
+			Dimensions:     currentDim,
+		})
+	}
+
+	// Same model, same dimension: idempotent, nothing to do.
+	if existing.EmbeddingModel == currentModel && existing.Dimensions == currentDim {
+		return nil
+	}
+
+	// Same model, different dimension: configuration inconsistency.
+	if existing.EmbeddingModel == currentModel && existing.Dimensions != currentDim {
+		return fmt.Errorf("%w: old=%d new=%d for schema %q",
+			ErrVectorDimensionMismatch, existing.Dimensions, currentDim, cs.Name)
+	}
+
+	// Different model: require explicit ReEmbed call.
+	return fmt.Errorf("%w: old model=%q new model=%q for schema %q; call ds.ReEmbed() to migrate",
+		ErrEmbeddingModelChanged, existing.EmbeddingModel, currentModel, cs.Name)
 }

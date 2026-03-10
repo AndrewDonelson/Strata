@@ -948,4 +948,141 @@ resp, _ := http.Get("http://" + ln.Addr().String() + "/peers")
 
 ---
 
+## Vector Search (L3 Semantic Layer)
+
+Strata supports `pgvector`-powered approximate nearest-neighbour search.
+Vectors live **only in L3** (never in L1/L2); the rest of the record is cached normally.
+
+### What you need
+
+| Requirement | Notes |
+|---|---|
+| `github.com/pgvector/pgvector-go v0.3.0` | already in `go.mod` |
+| Postgres with `pgvector` extension | `CREATE EXTENSION IF NOT EXISTS vector;` |
+| An `EmbeddingProvider` implementation | Built-ins: `NewOllamaProvider`, `NewOpenAIProvider` |
+
+### Defining a vector schema
+
+```go
+import pgvector "github.com/pgvector/pgvector-go"
+
+type FAQ struct {
+    ID         string          `strata:"primary_key"`
+    Question   string
+    CustomerID string
+    Embedding  pgvector.Vector `strata:"vector"` // L3-only; never in L1/L2
+}
+```
+
+Register with an optional HNSW or IVFFlat index:
+
+```go
+prov := strata.NewOllamaProvider("http://localhost:11434", "nomic-embed-text")
+
+ds, _ := strata.NewDataStore(strata.Config{
+    EmbeddingProvider: prov,
+    // … L2, L3 DSN etc.
+})
+
+_ = ds.Register(strata.Schema{
+    Name:  "faq",
+    Model: &FAQ{},
+    Indexes: []strata.Index{
+        {
+            Fields:         []string{"embedding"},
+            Type:           strata.IndexHNSW,
+            M:              16,
+            EfConstruction: 64,
+            DistanceFunc:   "cosine",
+        },
+    },
+})
+_ = ds.Migrate(ctx)
+```
+
+### VectorSearch
+
+```go
+results, err := ds.VectorSearch(ctx, "faq", "How do I refund?", 10, map[string]any{
+    "customer_id": "cust-42",
+})
+for _, r := range results {
+    faq := r.Value.(*FAQ)
+    fmt.Printf("score=%.4f  %s\n", r.Score, faq.Question)
+}
+```
+
+`VectorSearch` embeds the query text, executes an ANN query in Postgres, and
+warms L2/L1 caches on the results (vector fields stripped before cache storage).
+
+### ReEmbed (model migration)
+
+```go
+// After switching to a new embedding model:
+err := ds.ReEmbed(ctx, "faq", "Question")
+```
+
+`ReEmbed` is resumable — it persists progress in `strata_schema_meta` and picks
+up where it left off if interrupted.
+
+### Built-in providers
+
+```go
+// Ollama (dimension auto-detected on first call)
+prov := strata.NewOllamaProvider("http://cqai:11434", "nomic-embed-text")
+
+// OpenAI (dimension read from well-known map or detected on first call)
+prov := strata.NewOpenAIProvider(os.Getenv("OPENAI_API_KEY"), "text-embedding-3-small")
+```
+
+Both implement:
+```go
+type EmbeddingProvider interface {
+    Embed(ctx context.Context, text string) (pgvector.Vector, error)
+    Dimensions() int   // called once at Register time
+    ModelID() string   // stored in strata_schema_meta; change triggers ErrEmbeddingModelChanged
+}
+```
+
+### Index types
+
+| Constant | Postgres index | Use when |
+|---|---|---|
+| `strata.IndexDefault` (empty) | btree / sequential scan | small tables, testing |
+| `strata.IndexIVFFlat` | `ivfflat` | fast build, moderate recall; set `Lists` |
+| `strata.IndexHNSW` | `hnsw` | high recall, slower build; set `M`, `EfConstruction` |
+| `strata.IndexTrigram` | `gin (gin_trgm_ops)` | full-text similarity on plain columns |
+
+Distance functions: `"cosine"` (default), `"l2"`, `"ip"` (inner product).
+
+### Vector errors
+
+| Error | Meaning |
+|---|---|
+| `ErrNoVectorField` | Schema has no `strata:"vector"` field |
+| `ErrPgvectorExtensionMissing` | `CREATE EXTENSION vector` not run in Postgres |
+| `ErrVectorDimensionMismatch` | Provider returned 0 or wrong dimension |
+| `ErrInvalidIndexType` | IVFFlat/HNSW index targets a non-vector field |
+| `ErrTopKInvalid` | `topK < 1` |
+| `ErrNoEmbeddingProvider` | `Config.EmbeddingProvider` is nil |
+| `ErrEmbeddingModelChanged` | Model ID in `strata_schema_meta` differs from provider |
+| `ErrReEmbedAlreadyRunning` | Another `ReEmbed` is in progress |
+| `ErrReEmbedTextFieldMissing` | `textFieldName` not found in model struct |
+| `ErrInvalidTagForType` | `strata:"vector"` on a non-`pgvector.Vector` field |
+| `ErrEmptyVectorQuery` | Blank/whitespace query string to `VectorSearch` |
+| `ErrNilContext` | nil `ctx` passed to `VectorSearch` or `ReEmbed` |
+
+### Anti-patterns
+
+| ❌ Don't | ✅ Do instead |
+|---|---|
+| Hardcode dimension numbers (`vector(768)`) | Let the provider supply dimensions; set `Config.EmbeddingProvider` |
+| Expect vector fields in L1/L2 cache | Vector fields are always stripped; fetch from L3 or VectorSearch |
+| Run `ReEmbed` while keeping same schema name + changed model | Strata detects model change via `strata_schema_meta`; it returns `ErrEmbeddingModelChanged` so you know to call `ReEmbed` |
+| Use IVFFlat/HNSW on a non-vector column | Only `pgvector.Vector` fields support ANN index types |
+| Call `VectorSearch` without calling `Migrate` first | `Migrate` creates the `vector(N)` column and `strata_schema_meta`; vector queries will fail without it |
+| Forget `CREATE EXTENSION IF NOT EXISTS vector` | `Migrate` checks for the extension and returns `ErrPgvectorExtensionMissing` |
+
+---
+
 *Skill maintained alongside the Strata source at `/home/andrew/Development/Golang/Strata/SKILL.md`.*
