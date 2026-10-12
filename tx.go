@@ -128,9 +128,11 @@ func (ds *DataStore) runTxOnce(ctx context.Context, opts TxOptions, fn func(tx *
 	scope := &TxScope{ds: ds, ctx: ctx, tx: pgxTx, exec: txExecer(pgxTx)}
 	if err := fn(scope); err != nil {
 		_ = pgxTx.Rollback(ctx)
+		scope.undo.revert() // also runs before a retry, so fn sees the versions it started with
 		return err
 	}
 	if err := pgxTx.Commit(ctx); err != nil {
+		scope.undo.revert()
 		return &txCommitError{err}
 	}
 	for _, op := range scope.ops {
@@ -168,6 +170,7 @@ type TxScope struct {
 	tx   pgx.Tx
 	exec rowsExecer
 	ops  []scopeOp
+	undo versionUndo
 }
 
 type scopeOp struct {
@@ -257,7 +260,8 @@ func (s *TxScope) write(schemaName, id string, value any, kind l3WriteKind) erro
 			return err
 		}
 	}
-	if err := s.ds.writeL3(s.ctx, s.exec, cs, value, kind); err != nil {
+	if err := s.ds.writeL3(s.ctx, s.exec, cs, value, kind, &s.undo); err != nil {
+		s.ds.dropOnConflict(s.ctx, cs, id, err)
 		return err
 	}
 	s.ops = append(s.ops, scopeOp{cs: cs, id: id, value: value})

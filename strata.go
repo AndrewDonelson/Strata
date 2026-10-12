@@ -807,6 +807,7 @@ func (tx *Tx) Commit() error {
 		return fmt.Errorf("%w: %v", ErrTxFailed, err)
 	}
 	exec := txExecer(pgxTx)
+	var undo versionUndo
 	for i, op := range tx.ops {
 		cs := schemas[i]
 		switch {
@@ -815,16 +816,19 @@ func (tx *Tx) Commit() error {
 				fmt.Sprintf("DELETE FROM %s WHERE %s = $1", cs.tableName, cs.pkColumn.Name),
 				[]any{op.id})
 		case op.insert:
-			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Insert)
+			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Insert, &undo)
 		default:
-			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Upsert)
+			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Upsert, &undo)
 		}
 		if err != nil {
 			_ = pgxTx.Rollback(tx.ctx)
+			undo.revert()
+			tx.ds.dropOnConflict(tx.ctx, cs, op.id, err)
 			return fmt.Errorf("%w: %w", ErrTxFailed, err)
 		}
 	}
 	if err := pgxTx.Commit(tx.ctx); err != nil {
+		undo.revert()
 		return fmt.Errorf("%w: %w", ErrTxFailed, err)
 	}
 	// Post-commit: caches only. L3 already holds the committed data.

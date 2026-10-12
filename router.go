@@ -147,11 +147,30 @@ func (ds *DataStore) routerSetWriteThrough(ctx context.Context, cs *compiledSche
 	// L3 first
 	if ds.l3 != nil {
 		if err := ds.writeToL3(ctx, cs, value); err != nil {
+			ds.dropOnConflict(ctx, cs, id, err)
 			return err
 		}
 	}
 	ds.afterL3Set(ctx, cs, id, value)
 	return nil
+}
+
+// dropOnConflict evicts id from L1 and L2 (here and on other nodes) after a
+// version conflict. The conflict proves the cached copy may be stale; without
+// this, a "re-read and retry" loop could keep reading the same stale version.
+func (ds *DataStore) dropOnConflict(ctx context.Context, cs *compiledSchema, id string, err error) {
+	if !errors.Is(err, ErrConflict) {
+		return
+	}
+	if ds.l1 != nil {
+		ds.l1.Delete(cs.l1Prefix + id)
+	}
+	if ds.l2 != nil {
+		_ = ds.l2.DeleteP(ctx, cs.l2Prefix, id)
+	}
+	if ds.sync != nil {
+		ds.sync.publishInvalidation(ctx, cs.Name, id, "delete")
+	}
 }
 
 // afterL3Set propagates a value that is already durable in L3 to L4, L2 and L1,
@@ -204,6 +223,7 @@ func (ds *DataStore) routerSetL1Async(ctx context.Context, cs *compiledSchema, i
 	// L3 + L2 synchronously
 	if ds.l3 != nil {
 		if err := ds.writeToL3(ctx, cs, value); err != nil {
+			ds.dropOnConflict(ctx, cs, id, err)
 			return err
 		}
 	}
@@ -393,9 +413,9 @@ func (ds *DataStore) writeToL3(ctx context.Context, cs *compiledSchema, value an
 	}
 	if cs.versionColumn == nil {
 		// Unversioned upsert outside a transaction keeps using Upsert directly.
-		return ds.writeL3(ctx, nil, cs, value, l3Upsert)
+		return ds.writeL3(ctx, nil, cs, value, l3Upsert, nil)
 	}
-	return ds.writeL3(ctx, ds.l3.ExecRows, cs, value, l3Upsert)
+	return ds.writeL3(ctx, ds.l3.ExecRows, cs, value, l3Upsert, nil)
 }
 
 // insertToL3 writes value with a plain INSERT outside any transaction.
@@ -403,7 +423,7 @@ func (ds *DataStore) insertToL3(ctx context.Context, cs *compiledSchema, value a
 	if ds.l3 == nil {
 		return ErrL3Unavailable
 	}
-	return ds.writeL3(ctx, ds.l3.ExecRows, cs, value, l3Insert)
+	return ds.writeL3(ctx, ds.l3.ExecRows, cs, value, l3Insert, nil)
 }
 
 // writeL3 persists every column of value (omit_cache and vector fields
@@ -415,8 +435,10 @@ func (ds *DataStore) insertToL3(ctx context.Context, cs *compiledSchema, value a
 //     ErrConflict if no row matched
 //   - insert → version 1
 //
-// The caller's version field is bumped only after the write succeeds.
-func (ds *DataStore) writeL3(ctx context.Context, exec rowsExecer, cs *compiledSchema, value any, kind l3WriteKind) error {
+// The caller's version field is bumped only after the write succeeds. Inside a
+// transaction pass undo: each bump is recorded so it can be reverted if the
+// transaction doesn't commit.
+func (ds *DataStore) writeL3(ctx context.Context, exec rowsExecer, cs *compiledSchema, value any, kind l3WriteKind, undo *versionUndo) error {
 	val := reflect.ValueOf(value)
 	if val.Kind() == reflect.Ptr {
 		val = val.Elem()
@@ -511,7 +533,7 @@ func (ds *DataStore) writeL3(ctx context.Context, exec rowsExecer, cs *compiledS
 		if n == 0 {
 			return fmt.Errorf("%w: %s %v already exists (version 0 means create)", ErrConflict, cs.Name, pkVal)
 		}
-		versionField.SetInt(1)
+		undo.bump(versionField, 1)
 		return nil
 	}
 
@@ -540,8 +562,28 @@ func (ds *DataStore) writeL3(ctx context.Context, exec rowsExecer, cs *compiledS
 	if n == 0 {
 		return fmt.Errorf("%w: %s %v is not at version %d", ErrConflict, cs.Name, pkVal, oldVersion)
 	}
-	versionField.SetInt(oldVersion + 1)
+	undo.bump(versionField, oldVersion+1)
 	return nil
+}
+
+// versionUndo records version bumps made inside a transaction so they can be
+// reverted when it rolls back. A nil *versionUndo just applies the bump.
+type versionUndo []func()
+
+func (u *versionUndo) bump(field reflect.Value, to int64) {
+	if u != nil {
+		old := field.Int()
+		*u = append(*u, func() { field.SetInt(old) })
+	}
+	field.SetInt(to)
+}
+
+// revert restores every recorded version in reverse order and clears the log.
+func (u *versionUndo) revert() {
+	for i := len(*u) - 1; i >= 0; i-- {
+		(*u)[i]()
+	}
+	*u = nil
 }
 
 func mapInsertErr(cs *compiledSchema, err error) error {
@@ -679,14 +721,15 @@ func (ds *DataStore) decryptColumns(cols []l3pkg.ColumnDef, val reflect.Value) e
 		if !strings.HasPrefix(stored, encryptedPrefix) {
 			continue // plaintext (e.g. a value already decrypted in place)
 		}
+		// The prefix marks Strata ciphertext, so a failure here is a wrong key or
+		// corrupt data — never hand the ciphertext back as if it were plaintext.
 		cipher, err := base64.StdEncoding.DecodeString(stored[len(encryptedPrefix):])
 		if err != nil {
-			continue
+			return fmt.Errorf("%w: field %s: %v", ErrDecodeFailed, col.FieldName, err)
 		}
 		plain, err := ds.encryptor.Decrypt(cipher)
 		if err != nil {
-			// Not ciphertext (plain text), skip silently
-			continue
+			return fmt.Errorf("%w: field %s: %v", ErrDecodeFailed, col.FieldName, err)
 		}
 		f.SetString(string(plain))
 	}

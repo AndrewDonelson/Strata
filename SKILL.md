@@ -302,7 +302,9 @@ ds.Insert(ctx, schemaName, id string, value any) error
 ```go
 // Caller's version 0 → create with version 1; ErrConflict if the id exists.
 // Caller's version N → UPDATE ... WHERE version = N, store N+1; ErrConflict if it changed.
-// The caller's struct is bumped only on success.
+// The caller's struct is bumped only on success; bumps inside Tx/RunTx are reverted on rollback.
+// On ErrConflict the record is evicted from L1/L2 (all nodes) so the next Get reads Postgres.
+// Caches are eventually consistent — for decisions on the latest value, read inside RunTx.
 if err := ds.Set(ctx, "wallets", w.ID, &w); errors.Is(err, strata.ErrConflict) {
     // re-read and retry
 }

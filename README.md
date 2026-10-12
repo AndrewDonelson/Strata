@@ -346,7 +346,12 @@ Tag one integer field `version` and every `Set` becomes a compare-and-swap:
 | `0` | creates the record with version 1; `ErrConflict` if the id already exists |
 | `N` | updates only if the stored version is still `N`, then stores `N+1`; otherwise `ErrConflict` |
 
-The caller's struct is bumped to the new version only when the write succeeds.
+The caller's struct is bumped to the new version only when the write succeeds, and a bump made inside a
+`Tx` or `RunTx` is reverted if the transaction doesn't commit. On `ErrConflict` Strata evicts that record
+from L1/L2 (on every node), so the next `Get` reads the current version from Postgres.
+
+Caches are updated after each write and are eventually consistent across concurrent writers. When a
+decision must see the latest committed value, read it inside `RunTx` with `tx.Get`.
 
 ```go
 type Wallet struct {
@@ -616,6 +621,8 @@ Fields tagged `encrypted` are:
 - Encrypted with AES-256-GCM (random nonce per write) before being written to Postgres, stored as
   `enc:v1:` + base64(nonce‖ciphertext) so it fits a `TEXT` column.
 - Decrypted transparently on reads from L3.
+- A value that can't be decrypted (wrong or rotated key, corrupt data) fails the read with `ErrDecodeFailed`;
+  ciphertext is never returned as plaintext.
 - **Not** cached in L1 or L2 while encrypted — Strata stores plaintext in the fast tiers so reads are always as fast as possible.
 
 Only `string` fields support the `encrypted` tag today.

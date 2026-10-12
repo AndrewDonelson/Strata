@@ -70,13 +70,19 @@ func pgDSN(t *testing.T) string {
 // registered and migrated. Each call gets its own Redis.
 func newCCStore(t *testing.T, dsn string) *strata.DataStore {
 	t.Helper()
+	return newCCStoreWithKey(t, dsn, 1)
+}
+
+// newCCStoreWithKey is newCCStore with an encryption key derived from seed.
+func newCCStoreWithKey(t *testing.T, dsn string, seed byte) *strata.DataStore {
+	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	t.Cleanup(mr.Close)
 
 	key := make([]byte, 32)
 	for i := range key {
-		key[i] = byte(i + 1)
+		key[i] = byte(i) + seed
 	}
 	ds, err := strata.NewDataStore(strata.Config{
 		PostgresDSN:   dsn,
@@ -337,5 +343,66 @@ func TestCorrectnessPG(t *testing.T) {
 		ok, err = fresh.Exists(ctx, "cc_ledger", "s2")
 		require.NoError(t, err)
 		assert.False(t, ok)
+	})
+
+	// Review fix: a wrong key must fail loudly, not return ciphertext as plaintext.
+	t.Run("DecryptWithWrongKeyFails", func(t *testing.T) {
+		ds := newCCStore(t, dsn)
+		require.NoError(t, ds.Set(ctx, "cc_account", "k1",
+			&ccAccount{ID: "k1", Email: "k1@example.com", Secret: "top"}))
+		other := newCCStoreWithKey(t, dsn, 99)
+		var a ccAccount
+		err := other.Get(ctx, "cc_account", "k1", &a)
+		require.ErrorIs(t, err, strata.ErrDecodeFailed)
+	})
+
+	// Review fix: version bumps are reverted when the transaction doesn't commit.
+	t.Run("VersionRevertedOnRollback", func(t *testing.T) {
+		ds := newCCStore(t, dsn)
+		require.NoError(t, ds.Set(ctx, "cc_wallet", "wr", &ccWallet{ID: "wr", Balance: 1}))
+		require.NoError(t, ds.Set(ctx, "cc_ledger", "taken-r", &ccLedger{ID: "taken-r", IdemKey: "dup-r"}))
+
+		w := &ccWallet{ID: "wr", Balance: 2, Version: 1}
+		err := ds.Tx(ctx).
+			Set("cc_wallet", "wr", w).
+			Insert("cc_ledger", "x", &ccLedger{ID: "x", IdemKey: "dup-r"}). // fails
+			Commit()
+		require.ErrorIs(t, err, strata.ErrAlreadyExists)
+		assert.Equal(t, int64(1), w.Version, "Tx rollback must restore the caller's version")
+		require.NoError(t, ds.Set(ctx, "cc_wallet", "wr", w), "a retry with the same struct must work")
+		assert.Equal(t, int64(2), w.Version)
+
+		boom := errors.New("boom")
+		err = ds.RunTx(ctx, strata.TxOptions{}, func(tx *strata.TxScope) error {
+			if err := tx.Set("cc_wallet", "wr", w); err != nil {
+				return err
+			}
+			return boom
+		})
+		require.ErrorIs(t, err, boom)
+		assert.Equal(t, int64(2), w.Version, "RunTx rollback must restore the caller's version")
+	})
+
+	// Review fix: a conflict evicts the stale cached copy so re-read-and-retry converges.
+	t.Run("ConflictEvictsStaleCache", func(t *testing.T) {
+		a := newCCStore(t, dsn)
+		b := newCCStore(t, dsn) // separate L1 and Redis: no shared invalidation
+		require.NoError(t, a.Set(ctx, "cc_wallet", "wc", &ccWallet{ID: "wc", Balance: 10}))
+
+		var stale ccWallet
+		require.NoError(t, a.Get(ctx, "cc_wallet", "wc", &stale)) // cached at version 1
+
+		var fresh ccWallet
+		require.NoError(t, b.Get(ctx, "cc_wallet", "wc", &fresh))
+		fresh.Balance = 20
+		require.NoError(t, b.Set(ctx, "cc_wallet", "wc", &fresh)) // now version 2
+
+		stale.Balance = 5
+		require.ErrorIs(t, a.Set(ctx, "cc_wallet", "wc", &stale), strata.ErrConflict)
+
+		var reread ccWallet
+		require.NoError(t, a.Get(ctx, "cc_wallet", "wc", &reread))
+		assert.Equal(t, int64(2), reread.Version, "after a conflict the re-read must come from Postgres")
+		assert.Equal(t, int64(20), reread.Balance)
 	})
 }
