@@ -40,6 +40,8 @@ L4 (optional, independent of the read path above):
 4. [Core Operations](#core-operations)
    - [Get](#get)
    - [Set](#set)
+   - [Insert](#insert)
+   - [Optimistic Concurrency](#optimistic-concurrency)
    - [SetMany](#setmany)
    - [Delete](#delete)
    - [Search](#search)
@@ -199,13 +201,14 @@ Control column behaviour in PostgreSQL and caching behaviour with `strata` struc
 | `unique` | adds UNIQUE constraint in Postgres |
 | `index` | creates a non-unique database index |
 | `nullable` | column is NULL-able (default: NOT NULL) |
-| `omit_cache` | field excluded from L1 **and** L2 — stored in Postgres only |
+| `omit_cache` | field excluded from L1 **and** L2 — stored in Postgres only. `Get` still returns it: on a cache hit Strata reads just these columns from Postgres (one extra query). `Search` doesn't return it |
 | `omit_l1` | field excluded from L1 only; still cached in L2 |
 | `vector` | marks field as a `vector(N)` column in Postgres; implies `omit_cache` (never in L1/L2); field type must be `pgvector.Vector`; dimension is set automatically from `Config.EmbeddingProvider.Dimensions()` |
 | `default:X` | generates `DEFAULT X` in the DDL |
 | `auto_now_add` | set to `time.Now()` on first insert, never updated |
 | `auto_now` | set to `time.Now()` on every write |
 | `encrypted` | AES-256-GCM encrypted at rest (requires `EncryptionKey` in `Config`) |
+| `version` | optimistic-concurrency counter (`int`/`int32`/`int64`); see [Optimistic Concurrency](#optimistic-concurrency). Not allowed on `WriteBehind` schemas |
 | `-` | field is ignored entirely |
 
 ```go
@@ -321,6 +324,50 @@ player := &Player{ID: "p1", Username: "andrew", Level: 5}
 err := ds.Set(ctx, "players", "p1", player)
 ```
 
+### Insert
+
+Writes a record only if nothing with the same primary key **or** any `unique` column exists; otherwise
+returns `ErrAlreadyExists` and changes nothing. Use it for idempotency keys and append-only ledgers.
+`Insert` always writes Postgres synchronously (even on `WriteBehind` schemas) and runs the same hooks as `Set`.
+
+```go
+err := ds.Insert(ctx, "ledger", entry.ID, entry) // entry.IdemKey is `strata:"unique"`
+if errors.Is(err, strata.ErrAlreadyExists) {
+    // this request was already processed
+}
+```
+
+### Optimistic Concurrency
+
+Tag one integer field `version` and every `Set` becomes a compare-and-swap:
+
+| Caller's version | What Set does |
+|---|---|
+| `0` | creates the record with version 1; `ErrConflict` if the id already exists |
+| `N` | updates only if the stored version is still `N`, then stores `N+1`; otherwise `ErrConflict` |
+
+The caller's struct is bumped to the new version only when the write succeeds, and a bump made inside a
+`Tx` or `RunTx` is reverted if the transaction doesn't commit. On `ErrConflict` Strata evicts that record
+from L1/L2 (on every node), so the next `Get` reads the current version from Postgres.
+
+Caches are updated after each write and are eventually consistent across concurrent writers. When a
+decision must see the latest committed value, read it inside `RunTx` with `tx.Get`.
+
+```go
+type Wallet struct {
+    ID      string `strata:"primary_key"`
+    Balance int64
+    Version int64  `strata:"version"`
+}
+
+var w Wallet
+_ = ds.Get(ctx, "wallets", "w1", &w)
+w.Balance -= 10
+if err := ds.Set(ctx, "wallets", "w1", &w); errors.Is(err, strata.ErrConflict) {
+    // someone else wrote first — re-read and retry
+}
+```
+
 ### SetMany
 
 Writes multiple records in one call using a `map[string]any` of `id → value`:
@@ -416,18 +463,54 @@ strata.Q().Where("id = $1", id).ForceL2().Build() // skip L1 only
 
 ## Transactions
 
-`Tx` queues Set and Delete operations and commits them atomically to L3. Caches (L1 + L2) are updated only after a successful commit.
+### Batched: `Tx`
+
+`Tx` queues Set, Insert and Delete operations and runs them all in one Postgres transaction on `Commit`.
+If any of them fails, all are rolled back. Caches (L1 + L2) are updated only after a successful commit.
+Errors wrap both `ErrTxFailed` and the cause, so `errors.Is(err, strata.ErrConflict)` works too.
 
 ```go
 err := ds.Tx(ctx).
     Set("players", "p1", &Player{ID: "p1", Level: 99}).
-    Set("scores", "p1", &Score{PlayerID: "p1", Points: 9999}).
+    Insert("scores", "s1", &Score{ID: "s1", PlayerID: "p1", Points: 9999}).
     Delete("sessions", "old-session-id").
+    Isolation(strata.Serializable). // optional
     Commit()
 if errors.Is(err, strata.ErrTxFailed) {
     // all operations were rolled back
 }
 ```
+
+### Interactive: `RunTx`
+
+When a transaction has to read before it writes (check a balance, then debit it), use `RunTx`. Reads
+inside the callback go straight to Postgres within the transaction; caches are updated after commit.
+If the callback returns an error, everything is rolled back and that error is returned unchanged.
+
+Serialization failures and deadlocks are retried automatically (`TxOptions.MaxRetries`, default 5), so
+the callback may run more than once — keep non-database side effects out of it.
+
+```go
+err := ds.RunTx(ctx, strata.TxOptions{Isolation: strata.Serializable}, func(tx *strata.TxScope) error {
+    var w Wallet
+    if err := tx.Get("wallets", "w1", &w); err != nil {
+        return err
+    }
+    if w.Balance < 10 {
+        return strata.ErrInsufficientFunds
+    }
+    w.Balance -= 10
+    if err := tx.Set("wallets", "w1", &w); err != nil {
+        return err
+    }
+    return tx.Insert("ledger", entryID, &Entry{ID: entryID, Wallet: "w1", Amount: -10})
+})
+```
+
+`TxScope` offers `Get`, `GetForUpdate` (`SELECT ... FOR UPDATE`, for read-modify-write under
+`ReadCommitted`), `Exists`, `Search`, `Set`, `Insert` and `Delete`.
+
+Isolation levels: `strata.ReadCommitted` (Postgres default), `strata.RepeatableRead`, `strata.Serializable`.
 
 ---
 
@@ -535,8 +618,11 @@ ds, err := strata.NewDataStore(strata.Config{
 
 Fields tagged `encrypted` are:
 
-- Encrypted with AES-256-GCM (random nonce per write) before being written to Postgres.
+- Encrypted with AES-256-GCM (random nonce per write) before being written to Postgres, stored as
+  `enc:v1:` + base64(nonce‖ciphertext) so it fits a `TEXT` column.
 - Decrypted transparently on reads from L3.
+- A value that can't be decrypted (wrong or rotated key, corrupt data) fails the read with `ErrDecodeFailed`;
+  ciphertext is never returned as plaintext.
 - **Not** cached in L1 or L2 while encrypted — Strata stores plaintext in the fast tiers so reads are always as fast as possible.
 
 Only `string` fields support the `encrypted` tag today.
@@ -681,11 +767,14 @@ strata.ErrSchemaDuplicate   // Register called twice with same name
 strata.ErrNoPrimaryKey      // struct has no primary_key tag
 strata.ErrInvalidModel      // nil or non-pointer model
 strata.ErrMissingPrimaryKey // value passed to Set has empty/zero PK
+strata.ErrInvalidVersionTag // bad strata:"version" field (type, count, PK, or WriteBehind schema)
 
 // Data
 strata.ErrNotFound     // record does not exist in any tier
 strata.ErrDecodeFailed // codec or encryption decode error
 strata.ErrEncodeFailed // codec or encryption encode error
+strata.ErrConflict      // versioned write lost a race (stored version changed)
+strata.ErrAlreadyExists // Insert hit an existing primary key or unique value
 
 // Infrastructure
 strata.ErrL1Unavailable // in-memory store not initialised

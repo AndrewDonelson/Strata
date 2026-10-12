@@ -92,8 +92,8 @@ func (ds *DataStore) vectorSearchWithVec(
 ) ([]SimilarityResult, error) {
 	vectorFieldName := cs.vectorField.Name
 
-	// Build column list: all L3-visible columns (including vector field).
-	selectCols := colNamesWithVector(cs)
+	// Build column list: every persisted column (including the vector field).
+	selectCols := persistedColNames(cs)
 
 	// Build WHERE clause from filters.
 	var whereParts []string
@@ -139,7 +139,7 @@ LIMIT %d`,
 	var results []SimilarityResult
 	for rows.Next() {
 		elem := reflect.New(cs.modelType).Elem()
-		scanDests := buildScanDestWithVector(elem, cs)
+		scanDests := buildPersistedScanDest(elem, cs)
 
 		var score float64
 		allDests := append(scanDests, &score)

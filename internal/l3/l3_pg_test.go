@@ -316,7 +316,7 @@ func TestL3_BeginTx_Commit(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	tx, err := store.BeginTx(ctx)
+	tx, err := store.BeginTx(ctx, pgx.TxOptions{})
 	require.NoError(t, err)
 
 	_, err = tx.Exec(ctx, "INSERT INTO items (id, name, value) VALUES ($1, $2, $3)",
@@ -334,7 +334,7 @@ func TestL3_BeginTx_Rollback(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	tx, err := store.BeginTx(ctx)
+	tx, err := store.BeginTx(ctx, pgx.TxOptions{})
 	require.NoError(t, err)
 
 	_, err = tx.Exec(ctx, "INSERT INTO items (id, name, value) VALUES ($1, $2, $3)",

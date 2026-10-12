@@ -18,6 +18,7 @@ var (
 	ErrNoPrimaryKey      = errors.New("strata: struct has no primary_key field")
 	ErrInvalidModel      = errors.New("strata: model must be a non-nil pointer to a struct")
 	ErrMissingPrimaryKey = errors.New("strata: value is missing primary key")
+	ErrInvalidVersionTag = errors.New("strata: invalid strata:\"version\" field")
 )
 
 // Data errors
@@ -25,6 +26,15 @@ var (
 	ErrNotFound     = errors.New("strata: record not found")
 	ErrDecodeFailed = errors.New("strata: failed to decode stored value")
 	ErrEncodeFailed = errors.New("strata: failed to encode value for storage")
+
+	// ErrConflict is returned when a versioned write finds the stored version
+	// is not the one the caller read (another writer got there first), or when
+	// a versioned record with version 0 is created but the id already exists.
+	ErrConflict = errors.New("strata: version conflict")
+
+	// ErrAlreadyExists is returned by Insert when the primary key or any UNIQUE
+	// column already holds the value being inserted.
+	ErrAlreadyExists = errors.New("strata: record already exists")
 )
 
 // Infrastructure errors

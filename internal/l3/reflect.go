@@ -31,6 +31,7 @@ type ColumnDef struct {
 	IsIndexed    bool
 	IsEncrypted  bool
 	IsVector     bool // set by strata:"vector" tag; implies OmitCache (L3-only)
+	IsVersion    bool // set by strata:"version" tag; optimistic-concurrency counter
 	FieldIndex   int
 	FieldName    string
 }
@@ -88,9 +89,14 @@ func flattenStruct(t reflect.Type, cols *[]ColumnDef) {
 			case part == "vector":
 				col.IsVector = true
 				col.OmitCache = true // vector fields are never in L1/L2
+			case part == "version":
+				col.IsVersion = true
 			case strings.HasPrefix(part, "default:"):
 				col.DefaultValue = strings.TrimPrefix(part, "default:")
 			}
+		}
+		if col.IsVersion && col.DefaultValue == "" {
+			col.DefaultValue = "0" // lets ALTER TABLE add the column to existing rows
 		}
 		*cols = append(*cols, col)
 	}

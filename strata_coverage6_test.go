@@ -144,7 +144,10 @@ func (m *migrateTestL3) Query(_ context.Context, _ string, _ []any) (pgx.Rows, e
 	return &emptyRows{}, nil
 }
 
-func (m *migrateTestL3) BeginTx(_ context.Context) (pgx.Tx, error) {
+func (m *migrateTestL3) ExecRows(_ context.Context, _ string, _ []any) (int64, error) {
+	return 1, m.execErr
+}
+func (m *migrateTestL3) BeginTx(_ context.Context, _ pgx.TxOptions) (pgx.Tx, error) {
 	if m.beginTxErr != nil {
 		return nil, m.beginTxErr
 	}
