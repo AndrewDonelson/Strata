@@ -297,8 +297,10 @@ func buildCreateTableDDL(cs *compiledSchema) string {
 		cs.tableName, strings.Join(cols, ",\n  "))
 }
 
-// zeroDefault is the SQL literal that decodes to the Go zero value for a column type. JSONB uses
-// the JSON literal null (not SQL NULL), which decodes to nil slices/maps/pointers and zero structs.
+// zeroDefault is the SQL literal that existing rows get for a new NOT NULL column. It reads back as
+// the Go zero value for every type except BYTEA, which can't hold "nil" in a NOT NULL column and
+// reads back as a non-nil empty []byte. JSONB uses the JSON literal null (not SQL NULL), which
+// decodes to nil slices/maps/pointers and zero structs.
 func zeroDefault(sqlType string) string {
 	switch sqlType {
 	case "TEXT":

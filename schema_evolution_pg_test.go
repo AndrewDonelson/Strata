@@ -79,6 +79,7 @@ func TestSchemaEvolutionPG(t *testing.T) {
 		assert.Zero(t, got.Ratio)
 		assert.False(t, got.Enabled)
 		assert.True(t, got.SeenAt.IsZero(), "new time columns read back as the Go zero time, got %v", got.SeenAt)
+		assert.NotNil(t, got.Raw, "NOT NULL BYTEA reads back as empty bytes, not nil")
 		assert.Empty(t, got.Raw)
 		assert.Nil(t, got.Tags)
 		assert.Nil(t, got.Attrs)

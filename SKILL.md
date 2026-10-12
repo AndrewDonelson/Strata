@@ -288,7 +288,9 @@ records, err := ds.MigrationStatus(ctx)   // []MigrationRecord — inspect appli
 
 Migrations are **additive only** — Strata never drops or renames columns.
 A NOT NULL column added to a table that already has rows gets its type's zero value as the default
-(`''`, `0`, `false`, `0001-01-01`, empty bytes, JSON `null`), so existing rows read back as Go zero values.
+(`''`, `0`, `false`, `0001-01-01`, empty bytes, JSON `null`) — unless it's the primary key, a vector
+column, or has an explicit `default:` tag. Existing rows read back as Go zero values, except BYTEA,
+which reads back as a non-nil empty `[]byte`.
 Nil slices/maps/pointers in NOT NULL JSONB columns are stored as JSON `null` (read back as nil).
 Destructive changes must use manual SQL files with `MigrateFrom`.
 
