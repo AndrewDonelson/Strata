@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AndrewDonelson/strata/internal/codec"
@@ -51,8 +52,8 @@ type Store struct {
 	client    redis.UniversalClient
 	codec     codec.Codec
 	keyPrefix string
-	hits      int64
-	misses    int64
+	hits      atomic.Int64
+	misses    atomic.Int64
 }
 
 // Options configures a new L2 Store.
@@ -138,12 +139,12 @@ func (s *Store) Get(ctx context.Context, schema, keyPrefix, id string, dest any)
 	b, err := s.client.Get(ctx, k).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			s.misses++
+			s.misses.Add(1)
 			return ErrMiss
 		}
 		return fmt.Errorf("l2 get %s: %w", k, err)
 	}
-	s.hits++
+	s.hits.Add(1)
 	if err := s.codec.Unmarshal(b, dest); err != nil {
 		return fmt.Errorf("l2 unmarshal: %w", err)
 	}
@@ -203,12 +204,12 @@ func (s *Store) GetP(ctx context.Context, l2Prefix, id string, dest any) error {
 	b, err := s.client.Get(ctx, k).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			s.misses++
+			s.misses.Add(1)
 			return ErrMiss
 		}
 		return fmt.Errorf("l2 get %s: %w", k, err)
 	}
-	s.hits++
+	s.hits.Add(1)
 	if err := s.codec.Unmarshal(b, dest); err != nil {
 		return fmt.Errorf("l2 unmarshal: %w", err)
 	}
@@ -344,7 +345,7 @@ type Stats struct {
 
 // Stats returns current statistics.
 func (s *Store) Stats() Stats {
-	return Stats{Hits: s.hits, Misses: s.misses}
+	return Stats{Hits: s.hits.Load(), Misses: s.misses.Load()}
 }
 
 // SetRaw stores pre-encoded bytes directly.

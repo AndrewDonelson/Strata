@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -679,4 +680,28 @@ func BenchmarkL2_GetP(b *testing.B) {
 		var got testVal
 		_ = s.GetP(ctx, prefix, "b1", &got)
 	}
+}
+
+// TestL2_ConcurrentGetCountsSafely: hit/miss counters are shared by every goroutine reading the
+// store; run with -race (they were plain ints and raced under concurrent Gets).
+func TestL2_ConcurrentGetCountsSafely(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestStore(t)
+	require.NoError(t, s.SetP(ctx, "schema:", "hit", &testVal{ID: "hit"}, time.Minute))
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				var v testVal
+				_ = s.GetP(ctx, "schema:", "hit", &v)
+				_ = s.GetP(ctx, "schema:", "miss", &v)
+			}
+		}()
+	}
+	wg.Wait()
+	st := s.Stats()
+	assert.Equal(t, int64(400), st.Hits)
+	assert.Equal(t, int64(400), st.Misses)
 }
