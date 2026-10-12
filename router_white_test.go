@@ -5,7 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
+	l3pkg "github.com/AndrewDonelson/strata/internal/l3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -369,4 +371,51 @@ dests := buildScanDest(val, cs)
 // encWBModel has 3 non-omit-cache columns (ID, Token, Name).
 // partialModel only has ID → Token and Name use dummy placeholders.
 assert.Len(t, dests, 3)
+}
+
+func TestNullScan(t *testing.T) {
+	type row struct {
+		S  string
+		I  int
+		F  float32
+		B  bool
+		At time.Time
+	}
+	var r row
+	v := reflect.ValueOf(&r).Elem()
+	scan := func(field string, src any) error { return nullScan{f: v.FieldByName(field)}.Scan(src) }
+
+	require.NoError(t, scan("S", "x"))
+	require.NoError(t, scan("I", int64(4)))
+	require.NoError(t, scan("F", float64(1.5)))
+	require.NoError(t, scan("B", true))
+	at := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, scan("At", at))
+	assert.Equal(t, row{S: "x", I: 4, F: 1.5, B: true, At: at}, r)
+
+	for _, f := range []string{"S", "I", "F", "B", "At"} {
+		require.NoError(t, scan(f, nil))
+	}
+	assert.Equal(t, row{}, r, "NULL is the zero value")
+	assert.Error(t, scan("S", int64(65)), "an int is never turned into a string")
+	assert.Error(t, scan("I", "4"))
+
+	type small struct {
+		I8 int8
+		U8 uint8
+		F  float32
+	}
+	var sm small
+	sv := reflect.ValueOf(&sm).Elem()
+	scanSmall := func(field string, src any) error { return nullScan{f: sv.FieldByName(field)}.Scan(src) }
+	assert.Error(t, scanSmall("I8", int64(200)), "200 doesn't fit in int8 (it would wrap to -56)")
+	assert.Error(t, scanSmall("U8", int64(-1)), "no sign change")
+	assert.Error(t, scanSmall("U8", int64(256)))
+	assert.Error(t, scanSmall("F", float64(1e300)))
+	require.NoError(t, scanSmall("I8", int64(-128)))
+	require.NoError(t, scanSmall("U8", int64(255)))
+	assert.Equal(t, small{I8: -128, U8: 255}, sm)
+
+	assert.IsType(t, nullScan{}, scanTarget(v.FieldByName("At"), l3pkg.ColumnDef{IsNullable: true}))
+	assert.IsType(t, &time.Time{}, scanTarget(v.FieldByName("At"), l3pkg.ColumnDef{}), "not nullable: scan directly")
 }

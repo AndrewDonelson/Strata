@@ -58,6 +58,18 @@ func plainStore(t *testing.T, dsn string, schemas ...strata.Schema) *strata.Data
 	return ds
 }
 
+// evoNullable adds nullable scalar columns: existing rows hold NULL in them.
+type evoNullable struct {
+	ID      string `strata:"primary_key"`
+	Name    string
+	Note    string    `strata:"nullable"`
+	Count   int64     `strata:"nullable"`
+	Small   int       `strata:"nullable"`
+	Ratio   float32   `strata:"nullable"`
+	Enabled bool      `strata:"nullable"`
+	DueAt   time.Time `strata:"nullable,index"`
+}
+
 func TestSchemaEvolutionPG(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test")
@@ -96,6 +108,36 @@ func TestSchemaEvolutionPG(t *testing.T) {
 		assert.True(t, b.SeenAt.Equal(now))
 		assert.Equal(t, []string{"x"}, b.Tags)
 		assert.Equal(t, 2, b.Detail.Level)
+	})
+
+	t.Run("AddNullableColumnsToTableWithRows", func(t *testing.T) {
+		v1 := plainStore(t, dsn, strata.Schema{Name: "evo_null", Model: &evoV1{}})
+		require.NoError(t, v1.Set(ctx, "evo_null", "a", &evoV1{ID: "a", Name: "old row"}))
+
+		// Nullable columns are added without a default, so the old row reads back NULL in each.
+		v2 := plainStore(t, dsn, strata.Schema{Name: "evo_null", Model: &evoNullable{}})
+		var got evoNullable
+		require.NoError(t, v2.Get(ctx, "evo_null", "a", &got), "NULL in a non-pointer nullable field reads as its zero value")
+		assert.Equal(t, evoNullable{ID: "a", Name: "old row"}, got)
+
+		due := time.Now().UTC().Truncate(time.Microsecond)
+		require.NoError(t, v2.Set(ctx, "evo_null", "b", &evoNullable{ID: "b", Name: "x new row", Note: "n", Count: 7, Small: 3, Ratio: 0.5, Enabled: true, DueAt: due}))
+		q := strata.Q().OrderBy("name").Build()
+		var all []evoNullable
+		require.NoError(t, v2.Search(ctx, "evo_null", &q, &all), "and through Search")
+		require.Len(t, all, 2)
+		assert.True(t, all[0].DueAt.IsZero())
+		assert.Equal(t, "n", all[1].Note)
+		assert.Equal(t, int64(7), all[1].Count)
+		assert.Equal(t, 3, all[1].Small)
+		assert.Equal(t, float32(0.5), all[1].Ratio)
+		assert.True(t, all[1].Enabled)
+		assert.True(t, all[1].DueAt.Equal(due))
+
+		dueQ := strata.Q().Where("due_at <= $1 AND due_at > $2", due.Add(time.Second), time.Unix(0, 0)).Build()
+		var due1 []evoNullable
+		require.NoError(t, v2.Search(ctx, "evo_null", &dueQ, &due1))
+		assert.Len(t, due1, 1, "NULL rows don't match a time range")
 	})
 
 	t.Run("NilJSONBInNotNullColumns", func(t *testing.T) {

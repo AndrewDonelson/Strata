@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -632,7 +633,7 @@ func buildScanDest(val reflect.Value, cs *compiledSchema) []any {
 			dests = append(dests, &dummy)
 			continue
 		}
-		dests = append(dests, f.Addr().Interface())
+		dests = append(dests, scanTarget(f, col))
 	}
 	return dests
 }
@@ -654,9 +655,92 @@ func scanDests(val reflect.Value, cols []l3pkg.ColumnDef) []any {
 			dests = append(dests, &dummy)
 			continue
 		}
-		dests = append(dests, f.Addr().Interface())
+		dests = append(dests, scanTarget(f, col))
 	}
 	return dests
+}
+
+// scanTarget is where a column scans into: the field itself, or, for a nullable column whose
+// field can't hold NULL (a string, number, bool or time.Time), a nullScan that stores the zero
+// value for NULL. Without it, a nullable column added to an existing table (rows read back NULL)
+// fails every read with "cannot scan NULL".
+func scanTarget(f reflect.Value, col l3pkg.ColumnDef) any {
+	if col.IsNullable && nullableScalar(f.Type()) {
+		return nullScan{f: f}
+	}
+	return f.Addr().Interface()
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
+func nullableScalar(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.String, reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		return true
+	}
+	return t == timeType
+}
+
+// nullScan scans one nullable column into a non-pointer field: NULL becomes the zero value.
+type nullScan struct{ f reflect.Value }
+
+func (n nullScan) Scan(src any) error {
+	if src == nil {
+		n.f.SetZero()
+		return nil
+	}
+	v := reflect.ValueOf(src)
+	t := n.f.Type()
+	if v.Type().AssignableTo(t) {
+		n.f.Set(v)
+		return nil
+	}
+	// Same family only (int64 → int, float64 → float32, string → a string type): Go also
+	// "converts" int to string, which would be wrong here.
+	if v.CanConvert(t) && sameFamily(v.Kind(), t.Kind()) {
+		if !fits(v, t) {
+			return fmt.Errorf("strata: %v doesn't fit in %s", src, t)
+		}
+		n.f.Set(v.Convert(t))
+		return nil
+	}
+	return fmt.Errorf("strata: can't scan %T into %s", src, t)
+}
+
+// fits reports whether number v converts to t without overflow or a sign change.
+func fits(v reflect.Value, t reflect.Type) bool {
+	z := reflect.New(t).Elem()
+	switch {
+	case v.CanInt() && z.CanInt():
+		return !z.OverflowInt(v.Int())
+	case v.CanInt() && z.CanUint():
+		return v.Int() >= 0 && !z.OverflowUint(uint64(v.Int()))
+	case v.CanUint() && z.CanUint():
+		return !z.OverflowUint(v.Uint())
+	case v.CanUint() && z.CanInt():
+		return v.Uint() <= math.MaxInt64 && !z.OverflowInt(int64(v.Uint()))
+	case v.CanFloat() && z.CanFloat():
+		return !z.OverflowFloat(v.Float())
+	}
+	return true
+}
+
+func sameFamily(a, b reflect.Kind) bool {
+	family := func(k reflect.Kind) int {
+		switch {
+		case k == reflect.String:
+			return 1
+		case k == reflect.Bool:
+			return 2
+		case k >= reflect.Int && k <= reflect.Uint64:
+			return 3
+		case k == reflect.Float32 || k == reflect.Float64:
+			return 4
+		}
+		return 0
+	}
+	return family(a) != 0 && family(a) == family(b)
 }
 
 func isNoRowsError(err error) bool {
