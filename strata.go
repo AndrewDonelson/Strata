@@ -168,7 +168,8 @@ type l3Backend interface {
 	Exec(ctx context.Context, sql string, args []any) error
 	Exists(ctx context.Context, table, pkColumn string, id any) (bool, error)
 	Count(ctx context.Context, table, where string, args []any) (int64, error)
-	BeginTx(ctx context.Context) (pgx.Tx, error)
+	ExecRows(ctx context.Context, sql string, args []any) (int64, error)
+	BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error)
 	Close()
 }
 
@@ -501,6 +502,41 @@ func (ds *DataStore) Set(ctx context.Context, schemaName, id string, value any) 
 	return err
 }
 
+// Insert stores value only if no record with the same primary key or UNIQUE
+// column value exists; otherwise it returns ErrAlreadyExists and changes
+// nothing. Use it for idempotency keys and append-only ledgers.
+//
+// Insert always writes L3 synchronously, even on WriteBehind schemas, because
+// the uniqueness check happens in Postgres. It runs the same hooks as Set.
+func (ds *DataStore) Insert(ctx context.Context, schemaName, id string, value any) error {
+	if ds.closed.Load() {
+		return ErrUnavailable
+	}
+	cs, err := ds.registry.get(schemaName)
+	if err != nil {
+		return err
+	}
+	if cs.Hooks.BeforeSet != nil {
+		if err := cs.Hooks.BeforeSet(ctx, value); err != nil {
+			return err
+		}
+	}
+	ds.stats.Sets.Add(1)
+	start := ds.cfg.Clock.Now()
+	err = ds.insertToL3(ctx, cs, value)
+	ds.metrics.RecordLatency(schemaName, "insert", time.Since(start))
+	if err != nil {
+		ds.stats.Errors.Add(1)
+		ds.metrics.RecordError(schemaName, "insert")
+		return err
+	}
+	ds.afterL3Set(ctx, cs, id, value)
+	if cs.Hooks.AfterSet != nil {
+		cs.Hooks.AfterSet(ctx, value)
+	}
+	return nil
+}
+
 // SetMany stores multiple id→value pairs for the given schema.
 func (ds *DataStore) SetMany(ctx context.Context, schemaName string, pairs map[string]any) error {
 	if ds.closed.Load() {
@@ -699,12 +735,15 @@ func (ds *DataStore) InvalidateAll(ctx context.Context, schemaName string) error
 // Transactions
 // ────────────────────────────────────────────────────────────────────────────
 
-// Tx is a lightweight transaction helper that queues L3 operations and
-// updates caches on commit.
+// Tx is a lightweight transaction helper that queues L3 operations, runs them
+// in one Postgres transaction on Commit, and updates caches only after the
+// commit succeeds. For transactions that need to read before they write, use
+// RunTx.
 type Tx struct {
-	ds  *DataStore
-	ops []txOp
-	ctx context.Context
+	ds        *DataStore
+	ops       []txOp
+	ctx       context.Context
+	isolation IsolationLevel
 }
 
 type txOp struct {
@@ -712,6 +751,7 @@ type txOp struct {
 	id     string
 	value  any
 	del    bool
+	insert bool
 }
 
 // Tx returns a new transaction bound to ctx.
@@ -719,9 +759,23 @@ func (ds *DataStore) Tx(ctx context.Context) *Tx {
 	return &Tx{ds: ds, ctx: ctx}
 }
 
-// Set queues a set operation in the transaction.
+// Isolation sets the transaction isolation level (default ReadCommitted).
+func (tx *Tx) Isolation(level IsolationLevel) *Tx {
+	tx.isolation = level
+	return tx
+}
+
+// Set queues an upsert in the transaction. Versioned schemas get the same
+// conflict check as DataStore.Set.
 func (tx *Tx) Set(schemaName, id string, value any) *Tx {
 	tx.ops = append(tx.ops, txOp{schema: schemaName, id: id, value: value})
+	return tx
+}
+
+// Insert queues an insert-only write; Commit fails with ErrAlreadyExists if the
+// primary key or a UNIQUE column is taken.
+func (tx *Tx) Insert(schemaName, id string, value any) *Tx {
+	tx.ops = append(tx.ops, txOp{schema: schemaName, id: id, value: value, insert: true})
 	return tx
 }
 
@@ -731,45 +785,54 @@ func (tx *Tx) Delete(schemaName, id string) *Tx {
 	return tx
 }
 
-// Commit executes all queued operations inside a single L3 transaction.
+// Commit executes all queued operations inside a single L3 transaction. Every
+// operation runs on the transaction, so a failure rolls all of them back.
+// Errors wrap ErrTxFailed and the cause, so errors.Is works for both
+// (e.g. ErrConflict, ErrAlreadyExists).
 func (tx *Tx) Commit() error {
 	if tx.ds.l3 == nil {
 		return ErrL3Unavailable
 	}
-	pgxTx, err := tx.ds.l3.BeginTx(tx.ctx)
+	// Resolve schemas before opening the transaction.
+	schemas := make([]*compiledSchema, len(tx.ops))
+	for i, op := range tx.ops {
+		cs, err := tx.ds.registry.get(op.schema)
+		if err != nil {
+			return err
+		}
+		schemas[i] = cs
+	}
+	pgxTx, err := tx.ds.l3.BeginTx(tx.ctx, pgx.TxOptions{IsoLevel: tx.isolation.pgx()})
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrTxFailed, err)
 	}
-	for _, op := range tx.ops {
-		cs, err := tx.ds.registry.get(op.schema)
+	exec := txExecer(pgxTx)
+	for i, op := range tx.ops {
+		cs := schemas[i]
+		switch {
+		case op.del:
+			_, err = exec(tx.ctx,
+				fmt.Sprintf("DELETE FROM %s WHERE %s = $1", cs.tableName, cs.pkColumn.Name),
+				[]any{op.id})
+		case op.insert:
+			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Insert)
+		default:
+			err = tx.ds.writeL3(tx.ctx, exec, cs, op.value, l3Upsert)
+		}
 		if err != nil {
 			_ = pgxTx.Rollback(tx.ctx)
-			return err
-		}
-		if op.del {
-			if _, err := pgxTx.Exec(tx.ctx,
-				fmt.Sprintf("DELETE FROM %s WHERE %s = $1", cs.tableName, cs.pkColumn.Name),
-				op.id); err != nil {
-				_ = pgxTx.Rollback(tx.ctx)
-				return fmt.Errorf("%w: %v", ErrTxFailed, err)
-			}
-		} else {
-			if err := tx.ds.writeToL3(tx.ctx, cs, op.value); err != nil {
-				_ = pgxTx.Rollback(tx.ctx)
-				return fmt.Errorf("%w: %v", ErrTxFailed, err)
-			}
+			return fmt.Errorf("%w: %w", ErrTxFailed, err)
 		}
 	}
 	if err := pgxTx.Commit(tx.ctx); err != nil {
-		return fmt.Errorf("%w: %v", ErrTxFailed, err)
+		return fmt.Errorf("%w: %w", ErrTxFailed, err)
 	}
-	// Post-commit: update caches
-	for _, op := range tx.ops {
-		cs, _ := tx.ds.registry.get(op.schema)
+	// Post-commit: caches only. L3 already holds the committed data.
+	for i, op := range tx.ops {
 		if op.del {
-			_ = tx.ds.routerDelete(tx.ctx, cs, op.id)
+			tx.ds.afterL3Delete(tx.ctx, schemas[i], op.id)
 		} else {
-			_ = tx.ds.routerSet(tx.ctx, cs, op.id, op.value)
+			tx.ds.afterL3Set(tx.ctx, schemas[i], op.id, op.value)
 		}
 	}
 	return nil

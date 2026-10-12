@@ -96,12 +96,13 @@ type Player struct {
 | `unique` | UNIQUE constraint in Postgres. |
 | `index` | Non-unique Postgres index. |
 | `nullable` | Column allows NULL (default is NOT NULL). |
-| `omit_cache` | Excluded from L1 **and** L2; Postgres only. |
+| `omit_cache` | Excluded from L1 **and** L2; stored in Postgres. `Get` still returns it (on a cache hit it re-reads just these columns from L3 — one extra query). `Search` does not return it. |
 | `omit_l1` | Excluded from L1 only; still in L2. |
 | `default:X` | SQL `DEFAULT X` in the DDL. |
 | `auto_now_add` | Set to `time.Now()` on first insert, never updated. |
 | `auto_now` | Set to `time.Now()` on every write. |
-| `encrypted` | AES-256-GCM encrypted at rest. Requires `EncryptionKey` in Config. String fields only. Stored plaintext in L1/L2 for read speed. |
+| `encrypted` | AES-256-GCM encrypted at rest, stored as `enc:v1:`+base64. Requires `EncryptionKey` in Config. String fields only. Stored plaintext in L1/L2 for read speed. |
+| `version` | Optimistic-concurrency counter (`int`/`int32`/`int64`, one per schema, not on `WriteBehind` schemas). Makes every `Set` a compare-and-swap — see below. |
 | `-` | Completely ignored — not persisted, not cached. |
 
 Multiple tags are **comma-separated** with no spaces: `strata:"unique,index,nullable"`.
@@ -288,16 +289,50 @@ records, err := ds.MigrationStatus(ctx)   // []MigrationRecord — inspect appli
 Migrations are **additive only** — Strata never drops or renames columns.
 Destructive changes must use manual SQL files with `MigrateFrom`.
 
+### Insert-only writes
+
+```go
+ds.Insert(ctx, schemaName, id string, value any) error
+// Plain INSERT. ErrAlreadyExists if the primary key OR any `unique` column is taken;
+// nothing is changed. Always synchronous to L3 (even WriteBehind). Same hooks as Set.
+```
+
+### Optimistic concurrency (`strata:"version"`)
+
+```go
+// Caller's version 0 → create with version 1; ErrConflict if the id exists.
+// Caller's version N → UPDATE ... WHERE version = N, store N+1; ErrConflict if it changed.
+// The caller's struct is bumped only on success.
+if err := ds.Set(ctx, "wallets", w.ID, &w); errors.Is(err, strata.ErrConflict) {
+    // re-read and retry
+}
+```
+
 ### Transactions
 
 ```go
+// Batched — every op runs on one Postgres transaction; any failure rolls back all.
 err := ds.Tx(ctx).
     Set("players", "p1", &Player{...}).
-    Set("scores",  "p1", &Score{...}).
+    Insert("ledger", "e1", &Entry{...}).
     Delete("sessions", "old-sid").
+    Isolation(strata.Serializable). // optional
     Commit()
-// L3 is committed atomically; L1/L2 are updated only after a successful commit.
-// Returns ErrTxFailed (wrapping the Postgres error) on rollback.
+// L1/L2 are updated only after a successful commit.
+// Errors wrap ErrTxFailed AND the cause: errors.Is(err, strata.ErrConflict) works.
+
+// Interactive — read, decide, write, atomically.
+err := ds.RunTx(ctx, strata.TxOptions{Isolation: strata.Serializable}, func(tx *strata.TxScope) error {
+    var w Wallet
+    if err := tx.Get("wallets", "w1", &w); err != nil { return err } // reads L3 inside the tx
+    if w.Balance < 10 { return strata.ErrInsufficientFunds }      // returned unchanged, rolled back
+    w.Balance -= 10
+    return tx.Set("wallets", "w1", &w)
+})
+// TxScope: Get, GetForUpdate (SELECT ... FOR UPDATE), Exists, Search, Set, Insert, Delete.
+// Serialization failures/deadlocks are retried (TxOptions.MaxRetries, default 5),
+// so the callback may run more than once — no non-DB side effects inside it.
+// Isolation: strata.ReadCommitted (default) | strata.RepeatableRead | strata.Serializable
 ```
 
 ---
@@ -352,11 +387,14 @@ strata.ErrSchemaDuplicate   // Register called twice for same name
 strata.ErrNoPrimaryKey      // struct has no primary_key tag
 strata.ErrInvalidModel      // nil or non-pointer model
 strata.ErrMissingPrimaryKey // struct passed to Set has zero/empty PK field
+strata.ErrInvalidVersionTag // bad strata:"version" field (type, count, PK, WriteBehind)
 
 // Data
 strata.ErrNotFound     // record absent from all tiers
 strata.ErrDecodeFailed // codec or decryption error on read
 strata.ErrEncodeFailed // codec or encryption error on write
+strata.ErrConflict      // versioned Set lost a race / version-0 create hit an existing id
+strata.ErrAlreadyExists // Insert hit an existing primary key or unique value
 
 // Infrastructure
 strata.ErrL1Unavailable // L1 not initialised
@@ -518,7 +556,8 @@ func (e *errL3) QueryRow(_ context.Context, _ string, _ []any) pgx.Row { return 
 func (e *errL3) Exec(_ context.Context, _ string, _ []any) error { return e.err }
 func (e *errL3) Exists(_ context.Context, _, _ string, _ any) (bool, error) { return false, e.err }
 func (e *errL3) Count(_ context.Context, _, _ string, _ []any) (int64, error) { return 0, e.err }
-func (e *errL3) BeginTx(_ context.Context) (pgx.Tx, error) { return nil, e.err }
+func (e *errL3) ExecRows(_ context.Context, _ string, _ []any) (int64, error) { return 0, e.err }
+func (e *errL3) BeginTx(_ context.Context, _ pgx.TxOptions) (pgx.Tx, error) { return nil, e.err }
 func (e *errL3) Close() {}
 
 ds.l3 = &errL3{err: strata.ErrL3Unavailable}
@@ -592,17 +631,16 @@ func (s *PlayerService) ListTopPlayers(ctx context.Context, page, size int) ([]P
 err := ds.Set(ctx, "players", player.ID, player)
 ```
 
-### Conditional write (check-then-set)
+### Conditional writes
 
 ```go
-// Strata has no native CAS. Use Exists + Set.
-// WARNING: not atomic — suitable only for low-contention scenarios.
-exists, err := ds.Exists(ctx, "players", id)
-if err != nil { return err }
-if !exists {
-    return ds.Set(ctx, "players", id, &newPlayer)
-}
-return strata.ErrSchemaDuplicate // or a domain error
+// Create only if absent (atomic): Insert.
+if err := ds.Insert(ctx, "players", id, &newPlayer); errors.Is(err, strata.ErrAlreadyExists) { ... }
+
+// Update only if unchanged (atomic): a strata:"version" field + Set → ErrConflict on a lost race.
+
+// Read-decide-write across rows (atomic): ds.RunTx with Serializable.
+// Never use Exists + Set for this — it races.
 ```
 
 ### Bulk load at startup
@@ -642,7 +680,9 @@ if errors.Is(err, strata.ErrTxFailed) {
 | Passing `*T` where `T` is not the model type to `Get` | `dest` must be `*ModelType` matching the registered schema |
 | Calling `MigrateFrom` with destructive SQL | Strata does not prevent destructive DDL via `MigrateFrom` — review files carefully |
 | Assuming `SearchCached` invalidates automatically | `SearchCached` caches by SQL fingerprint and expires by TTL only — invalidate manually with `Invalidate` or `InvalidateAll` if data changes frequently |
-| Not handling `ErrTxFailed` as retriable | `ErrTxFailed` is almost always a serialization failure or conflict — safe to retry with backoff |
+| Not handling `ErrTxFailed` as retriable | `ErrTxFailed` is almost always a serialization failure or conflict — safe to retry with backoff (`RunTx` retries serialization failures for you) |
+| Exists + Set for create-if-absent | `Insert` (returns `ErrAlreadyExists`) |
+| Read with `ds.Get` inside a read-modify-write | `ds.RunTx` + `tx.Get` — `ds.Get` reads caches outside the transaction |
 
 ---
 

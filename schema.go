@@ -122,6 +122,10 @@ type compiledSchema struct {
 	vectorField     *l3.ColumnDef // non-nil if schema has a strata:"vector" field
 	vectorDimension int           // set from EmbeddingProvider.Dimensions() at Register time
 	hasVectorFields bool          // true if vectorField != nil (fast check for cache stripping)
+
+	hasUncachedFields bool           // any omit_cache column (incl. vectors): strip before L1/L2
+	hiddenColumns     []l3.ColumnDef // non-vector omit_cache columns: Postgres-only, re-read on cache hits
+	versionColumn     *l3.ColumnDef  // strata:"version" column, nil if the schema is unversioned
 }
 
 // schemaRegistry holds all registered schemas.
@@ -196,8 +200,51 @@ func (r *schemaRegistry) register(s Schema) (*compiledSchema, error) {
 		}
 	}
 
+	for i := range cs.columns {
+		col := cs.columns[i]
+		if col.OmitCache {
+			cs.hasUncachedFields = true
+			if !col.IsVector {
+				cs.hiddenColumns = append(cs.hiddenColumns, col)
+			}
+		}
+		if col.IsVersion {
+			if err := validateVersionColumn(cs, col); err != nil {
+				return nil, err
+			}
+			cs.versionColumn = &cs.columns[i]
+		}
+	}
+
 	r.schemas[s.Name] = cs
 	return cs, nil
+}
+
+// validateVersionColumn enforces the rules for a strata:"version" field: one per
+// schema, an integer type, not the primary key, and not on a write-behind schema
+// (a conflict has to be reported to the caller, which write-behind can't do).
+func validateVersionColumn(cs *compiledSchema, col l3.ColumnDef) error {
+	if cs.versionColumn != nil {
+		return fmt.Errorf("%w: %s has more than one version field", ErrInvalidVersionTag, cs.Name)
+	}
+	if col.IsPK {
+		return fmt.Errorf("%w: %s.%s is the primary key", ErrInvalidVersionTag, cs.Name, col.FieldName)
+	}
+	f, ok := cs.modelType.FieldByName(col.FieldName)
+	if !ok {
+		return fmt.Errorf("%w: %s.%s not found", ErrInvalidVersionTag, cs.Name, col.FieldName)
+	}
+	switch f.Type.Kind() {
+	case reflect.Int, reflect.Int32, reflect.Int64:
+	default:
+		return fmt.Errorf("%w: %s.%s must be int, int32 or int64, got %s",
+			ErrInvalidVersionTag, cs.Name, col.FieldName, f.Type)
+	}
+	if cs.WriteMode == WriteBehind {
+		return fmt.Errorf("%w: %s uses WriteBehind, which can't report version conflicts",
+			ErrInvalidVersionTag, cs.Name)
+	}
+	return nil
 }
 
 func (r *schemaRegistry) get(name string) (*compiledSchema, error) {

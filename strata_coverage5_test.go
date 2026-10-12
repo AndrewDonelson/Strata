@@ -39,7 +39,8 @@ func (e *errL3) Exists(_ context.Context, _, _ string, _ any) (bool, error) {
 	return false, e.err
 }
 func (e *errL3) Count(_ context.Context, _, _ string, _ []any) (int64, error) { return 0, e.err }
-func (e *errL3) BeginTx(_ context.Context) (pgx.Tx, error)                    { return nil, e.err }
+func (e *errL3) ExecRows(_ context.Context, _ string, _ []any) (int64, error) { return 0, e.err }
+func (e *errL3) BeginTx(_ context.Context, _ pgx.TxOptions) (pgx.Tx, error)   { return nil, e.err }
 func (e *errL3) Close()                                                       {}
 
 // errRow is a pgx.Row whose Scan always returns the stored error.
@@ -272,7 +273,10 @@ type partialErrL3 struct {
 	upsertErr error  // l3Backend.Upsert error (nil = success)
 }
 
-func (p *partialErrL3) BeginTx(_ context.Context) (pgx.Tx, error) {
+func (p *partialErrL3) ExecRows(_ context.Context, _ string, _ []any) (int64, error) {
+	return 1, p.upsertErr
+}
+func (p *partialErrL3) BeginTx(_ context.Context, _ pgx.TxOptions) (pgx.Tx, error) {
 	if p.tx == nil {
 		if p.upsertErr != nil {
 			return nil, p.upsertErr
@@ -312,10 +316,9 @@ func TestTxCommit_WriteToL3Failure(t *testing.T) {
 	t.Cleanup(func() { _ = ds.Close() })
 
 	upsertFail := errors.New("forced upsert failure")
-	// BeginTx returns a working no-op tx; Upsert returns upsertFail.
+	// BeginTx returns a tx whose Exec fails: Tx writes run on the transaction.
 	ds.l3 = &partialErrL3{
-		tx:        &mockPGXTx{},
-		upsertErr: upsertFail,
+		tx: &mockPGXTx{execErr: upsertFail},
 	}
 	registerCov5Schema(t, ds, "tx_upsertfail", WriteThrough)
 
@@ -324,7 +327,8 @@ func TestTxCommit_WriteToL3Failure(t *testing.T) {
 		Commit()
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrTxFailed,
-		"writeToL3 failure inside Tx loop must wrap ErrTxFailed")
+		"write failure inside Tx loop must wrap ErrTxFailed")
+	require.ErrorIs(t, err, upsertFail, "the cause must stay in the chain")
 }
 
 // ── migrate.createTable — DDL exec failure path ───────────────────────────────

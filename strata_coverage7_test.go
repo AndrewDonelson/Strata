@@ -77,7 +77,10 @@ func (s *scanErrL3) Exists(_ context.Context, _, _ string, _ any) (bool, error) 
 	return false, nil
 }
 func (s *scanErrL3) Count(_ context.Context, _, _ string, _ []any) (int64, error) { return 0, nil }
-func (s *scanErrL3) BeginTx(_ context.Context) (pgx.Tx, error) {
+func (s *scanErrL3) ExecRows(_ context.Context, _ string, _ []any) (int64, error) {
+	return 0, s.err
+}
+func (s *scanErrL3) BeginTx(_ context.Context, _ pgx.TxOptions) (pgx.Tx, error) {
 	return nil, ErrL3Unavailable
 }
 func (s *scanErrL3) Close() {}

@@ -13,7 +13,10 @@ import (
 	"fmt"
 	"strings"
 
+	"errors"
+
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,27 +46,71 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // Upsert performs an INSERT ... ON CONFLICT DO UPDATE for the given table.
 func (s *Store) Upsert(ctx context.Context, table string, columns []string, values []any, pkColumn string) error {
-	placeholders := make([]string, len(columns))
-	updates := make([]string, 0, len(columns))
-	for i, col := range columns {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		if col != pkColumn {
-			updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", col, col))
-		}
-	}
-	sql := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
-		table,
-		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "),
-		pkColumn,
-		strings.Join(updates, ", "),
-	)
-	_, err := s.pool.Exec(ctx, sql, values...)
+	_, err := s.pool.Exec(ctx, UpsertSQL(table, columns, pkColumn), values...)
 	if err != nil {
 		return fmt.Errorf("l3 upsert %s: %w", table, err)
 	}
 	return nil
+}
+
+// UpsertSQL builds INSERT ... ON CONFLICT (pk) DO UPDATE with $1..$n placeholders
+// in column order.
+func UpsertSQL(table string, columns []string, pkColumn string) string {
+	updates := make([]string, 0, len(columns))
+	for _, col := range columns {
+		if col != pkColumn {
+			updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", col, col))
+		}
+	}
+	if len(updates) == 0 {
+		return InsertSQL(table, columns) + fmt.Sprintf(" ON CONFLICT (%s) DO NOTHING", pkColumn)
+	}
+	return InsertSQL(table, columns) +
+		fmt.Sprintf(" ON CONFLICT (%s) DO UPDATE SET %s", pkColumn, strings.Join(updates, ", "))
+}
+
+// InsertSQL builds a plain INSERT with $1..$n placeholders in column order.
+func InsertSQL(table string, columns []string) string {
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		table, strings.Join(columns, ", "), strings.Join(placeholders, ", "))
+}
+
+// ExecRows executes a statement on the primary and returns the affected row count.
+func (s *Store) ExecRows(ctx context.Context, sql string, args []any) (int64, error) {
+	tag, err := s.pool.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// PostgreSQL SQLSTATE codes Strata maps to its own errors.
+const (
+	codeUniqueViolation      = "23505"
+	codeSerializationFailure = "40001"
+	codeDeadlockDetected     = "40P01"
+)
+
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+// IsUniqueViolation reports whether err is a primary-key or UNIQUE violation.
+func IsUniqueViolation(err error) bool { return pgCode(err) == codeUniqueViolation }
+
+// IsRetryable reports whether err is a serialization failure or deadlock, i.e.
+// the transaction can succeed if run again.
+func IsRetryable(err error) bool {
+	c := pgCode(err)
+	return c == codeSerializationFailure || c == codeDeadlockDetected
 }
 
 // DeleteByID removes a row by primary key.
@@ -123,9 +170,9 @@ func CopyFromSlice(rows [][]any) pgx.CopyFromSource {
 	return pgx.CopyFromRows(rows)
 }
 
-// BeginTx starts a transaction.
-func (s *Store) BeginTx(ctx context.Context) (pgx.Tx, error) {
-	return s.pool.Begin(ctx)
+// BeginTx starts a transaction with the given options (zero value = server defaults).
+func (s *Store) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	return s.pool.BeginTx(ctx, opts)
 }
 
 // Exists checks if a row exists.

@@ -109,7 +109,7 @@ func (ds *DataStore) MigrateFrom(ctx context.Context, dir string) error {
 		if err != nil {
 			return fmt.Errorf("migrate-from read %q: %w", fname, err)
 		}
-		tx, err := ds.l3.BeginTx(ctx)
+		tx, err := ds.l3.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
 			return fmt.Errorf("migrate-from begin tx %q: %w", fname, err)
 		}
@@ -188,7 +188,7 @@ func (ds *DataStore) tableExists(ctx context.Context, table string) (bool, error
 
 func (ds *DataStore) createTable(ctx context.Context, cs *compiledSchema) error {
 	ddl := buildCreateTableDDL(cs)
-	tx, err := ds.l3.BeginTx(ctx)
+	tx, err := ds.l3.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
@@ -225,7 +225,7 @@ func (ds *DataStore) alterTable(ctx context.Context, cs *compiledSchema) error {
 	if len(stmts) == 0 {
 		return nil
 	}
-	tx, err := ds.l3.BeginTx(ctx)
+	tx, err := ds.l3.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
