@@ -219,6 +219,11 @@ func (ds *DataStore) alterTable(ctx context.Context, cs *compiledSchema) error {
 		if _, seen := existing[col.Name]; seen {
 			continue
 		}
+		// A NOT NULL column without a default can't be added to a table that has rows, so give
+		// it the zero value of its type: existing rows then read back as Go zero values.
+		if !col.IsNullable && !col.IsPK && col.DefaultValue == "" && !col.IsVector {
+			col.DefaultValue = zeroDefault(col.SQLType)
+		}
 		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", cs.tableName, buildColumnDef(col, cs.vectorDimension))
 		stmts = append(stmts, stmt)
 	}
@@ -290,6 +295,27 @@ func buildCreateTableDDL(cs *compiledSchema) string {
 	}
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
 		cs.tableName, strings.Join(cols, ",\n  "))
+}
+
+// zeroDefault is the SQL literal that decodes to the Go zero value for a column type. JSONB uses
+// the JSON literal null (not SQL NULL), which decodes to nil slices/maps/pointers and zero structs.
+func zeroDefault(sqlType string) string {
+	switch sqlType {
+	case "TEXT":
+		return "''"
+	case "BOOLEAN":
+		return "false"
+	case "INTEGER", "BIGINT", "REAL", "DOUBLE PRECISION":
+		return "0"
+	case "TIMESTAMPTZ":
+		return "'0001-01-01 00:00:00+00'"
+	case "BYTEA":
+		return "'\\x'::bytea"
+	case "JSONB":
+		return "'null'::jsonb"
+	default:
+		return ""
+	}
 }
 
 func buildColumnDef(col l3.ColumnDef, vectorDim int) string {
