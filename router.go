@@ -10,6 +10,7 @@ package strata
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -490,7 +491,7 @@ func (ds *DataStore) writeL3(ctx context.Context, exec rowsExecer, cs *compiledS
 			pkVal = f.Interface()
 		}
 		cols = append(cols, col.Name)
-		vals = append(vals, f.Interface())
+		vals = append(vals, columnValue(col, f))
 	}
 
 	if cs.versionColumn == nil || versionIdx < 0 {
@@ -584,6 +585,24 @@ func (u *versionUndo) revert() {
 		(*u)[i]()
 	}
 	*u = nil
+}
+
+// columnValue is the value written for a field. In NOT NULL columns, a nil slice, map or pointer
+// would be sent as SQL NULL and rejected: JSONB gets the JSON literal null (reads back as nil) and
+// BYTEA gets empty bytes.
+func columnValue(col l3pkg.ColumnDef, f reflect.Value) any {
+	if col.SQLType == "BYTEA" && !col.IsNullable && f.Kind() == reflect.Slice && f.IsNil() {
+		return []byte{}
+	}
+	if col.SQLType == "JSONB" && !col.IsNullable {
+		switch f.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Pointer, reflect.Interface:
+			if f.IsNil() {
+				return json.RawMessage("null")
+			}
+		}
+	}
+	return f.Interface()
 }
 
 func mapInsertErr(cs *compiledSchema, err error) error {
