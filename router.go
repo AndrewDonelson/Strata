@@ -328,7 +328,8 @@ func (ds *DataStore) setL1(cs *compiledSchema, key string, value any) {
 	if ttl == 0 {
 		ttl = ds.cfg.DefaultL1TTL
 	}
-	ds.l1.Set(key, value, ttl)
+	// The cache keeps its own copy: the caller may go on mutating value.
+	ds.l1.Set(key, deepCopy(value), ttl)
 }
 
 func (ds *DataStore) setL2(ctx context.Context, cs *compiledSchema, id string, value any) error {
@@ -676,12 +677,13 @@ func populateDest(raw any, dest any) (bool, error) {
 		return false, nil
 	}
 	destElem := destVal.Elem()
+	// raw is the cache's copy: hand out a deep copy so the caller can't change it.
 	if rawVal.Type().AssignableTo(destElem.Type()) {
-		destElem.Set(rawVal)
+		destElem.Set(copyValue(rawVal))
 		return true, nil
 	}
 	if rawVal.Kind() == reflect.Ptr && rawVal.Elem().Type().AssignableTo(destElem.Type()) {
-		destElem.Set(rawVal.Elem())
+		destElem.Set(copyValue(rawVal.Elem()))
 		return true, nil
 	}
 	return false, nil
