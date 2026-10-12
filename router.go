@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -698,10 +699,31 @@ func (n nullScan) Scan(src any) error {
 	// Same family only (int64 → int, float64 → float32, string → a string type): Go also
 	// "converts" int to string, which would be wrong here.
 	if v.CanConvert(t) && sameFamily(v.Kind(), t.Kind()) {
+		if !fits(v, t) {
+			return fmt.Errorf("strata: %v doesn't fit in %s", src, t)
+		}
 		n.f.Set(v.Convert(t))
 		return nil
 	}
 	return fmt.Errorf("strata: can't scan %T into %s", src, t)
+}
+
+// fits reports whether number v converts to t without overflow or a sign change.
+func fits(v reflect.Value, t reflect.Type) bool {
+	z := reflect.New(t).Elem()
+	switch {
+	case v.CanInt() && z.CanInt():
+		return !z.OverflowInt(v.Int())
+	case v.CanInt() && z.CanUint():
+		return v.Int() >= 0 && !z.OverflowUint(uint64(v.Int()))
+	case v.CanUint() && z.CanUint():
+		return !z.OverflowUint(v.Uint())
+	case v.CanUint() && z.CanInt():
+		return v.Uint() <= math.MaxInt64 && !z.OverflowInt(int64(v.Uint()))
+	case v.CanFloat() && z.CanFloat():
+		return !z.OverflowFloat(v.Float())
+	}
+	return true
 }
 
 func sameFamily(a, b reflect.Kind) bool {

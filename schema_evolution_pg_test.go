@@ -60,7 +60,7 @@ func plainStore(t *testing.T, dsn string, schemas ...strata.Schema) *strata.Data
 
 // evoNullable adds nullable scalar columns: existing rows hold NULL in them.
 type evoNullable struct {
-	ID      string    `strata:"primary_key"`
+	ID      string `strata:"primary_key"`
 	Name    string
 	Note    string    `strata:"nullable"`
 	Count   int64     `strata:"nullable"`
